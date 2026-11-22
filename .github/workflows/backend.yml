@@ -33,6 +33,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Install
+        working-directory: functions
+        run: npm ci
       - name: Syntax check
         working-directory: functions
         run: for f in *.js lib/*.js test/*.js; do node --check "$f"; done
