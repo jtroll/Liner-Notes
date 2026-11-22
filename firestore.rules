@@ -3,8 +3,8 @@ rules_version = '2';
 // Phase 0. Each person reads and writes only their own user document, and never the fields the
 // Functions own: the Last.fm and Spotify connections (set only after a real sign-in swap) and the
 // role. Tokens live in users/{uid}/private/*, which no client can touch; the Admin SDK in the
-// Functions ignores these rules. Pairs, sends and notes arrive with their own rules in later
-// phases (SPEC.md, "Data model").
+// Functions ignores these rules. Group sets and writing settings are the owner's alone. Pairs,
+// sends and the recipient's inbox arrive with their own rules in later phases (SPEC.md, "Data model").
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
@@ -21,6 +21,14 @@ service cloud.firestore {
 
       match /private/{doc} {
         allow read, write: if false;
+      }
+
+      match /sets/{setId} {
+        allow read, write: if owner(uid);
+      }
+
+      match /settings/{doc} {
+        allow read, write: if owner(uid);
       }
     }
 

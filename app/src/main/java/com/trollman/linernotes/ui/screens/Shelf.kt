@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -65,6 +66,7 @@ fun ShelfScreen(
     vm: AppViewModel,
     onOpen: (Album) -> Unit,
     onSettings: () -> Unit,
+    onGroupSend: () -> Unit,
 ) {
     val c = liner
     val shelf = ui.shelf
@@ -88,6 +90,13 @@ fun ShelfScreen(
                 Column {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("LINER NOTES", style = mono(13.sp), color = c.ink, modifier = Modifier.weight(1f))
+                        PhysicalButton(
+                            onGroupSend,
+                            Modifier.height(44.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            contentDescription = "Group send: a set of albums with a note on each",
+                        ) { Text("GROUP SEND", style = mono(12.sp), modifier = Modifier.padding(horizontal = 14.dp)) }
+                        Spacer(Modifier.width(10.dp))
                         PhysicalButton(
                             onSettings,
                             Modifier.size(44.dp),

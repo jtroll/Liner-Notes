@@ -6,8 +6,12 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.functions.FirebaseFunctions
+import com.trollman.linernotes.data.Fit
 import com.trollman.linernotes.data.Profile
+import com.trollman.linernotes.data.Source
 import com.trollman.linernotes.data.SpotifyAlbum
+import com.trollman.linernotes.data.Writing
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -24,8 +28,100 @@ class Cloud {
     private val functions = FirebaseFunctions.getInstance()
     private val db = FirebaseFirestore.getInstance()
 
-    private suspend fun call(name: String, data: Map<String, Any?>): Map<*, *> =
-        functions.getHttpsCallable(name).call(data).await().getData() as? Map<*, *> ?: emptyMap<String, Any?>()
+    private suspend fun call(name: String, data: Map<String, Any?>, timeoutSeconds: Long = 70): Map<*, *> =
+        functions.getHttpsCallable(name).apply { setTimeout(timeoutSeconds, TimeUnit.SECONDS) }
+            .call(data).await().getData() as? Map<*, *> ?: emptyMap<String, Any?>()
+
+    private fun style(w: Writing) = mapOf(
+        "examples" to w.styleExamples.filter { it.isNotBlank() },
+        "toneNotes" to w.toneNotes,
+        "minWords" to w.minWords,
+        "maxWords" to w.maxWords,
+    )
+
+    /** What Claude's draft of one note came back with. */
+    data class Draft(val note: String, val sources: List<Source>, val flags: List<String>)
+
+    /**
+     * Drafts one album's note in the sender's voice (functions/lib/notes.js). Takes up to a couple
+     * of minutes: it reads Wikipedia, searches for reviews, writes, then fact-checks.
+     */
+    suspend fun draftNote(
+        artist: String,
+        album: String,
+        writing: Writing,
+        recipientName: String,
+        taste: String,
+        plays: Int,
+        weeks: Int,
+        rangeLabel: String,
+        favoriteTracks: List<String>,
+        isCloser: Boolean,
+        instruction: String? = null,
+        previous: String? = null,
+    ): Draft {
+        val r = call(
+            "draftNote",
+            mapOf(
+                "artist" to artist, "album" to album,
+                "senderName" to writing.senderName, "recipientName" to recipientName, "taste" to taste,
+                "plays" to plays, "weeks" to weeks, "rangeLabel" to rangeLabel,
+                "favoriteTracks" to favoriteTracks, "isCloser" to isCloser,
+                "style" to style(writing), "instruction" to instruction, "previous" to previous,
+            ),
+            timeoutSeconds = 300,
+        )
+        val sources = (r["sources"] as? List<*>).orEmpty().mapNotNull { s ->
+            val m = s as? Map<*, *> ?: return@mapNotNull null
+            val url = m["url"] as? String ?: return@mapNotNull null
+            Source(title = m["title"] as? String ?: url, url = url)
+        }
+        val flags = (r["flags"] as? List<*>).orEmpty().mapNotNull { it as? String }
+        return Draft(note = r["note"] as? String ?: "", sources = sources, flags = flags)
+    }
+
+    /** Drafts the set's intro or closing note, starting from last year's. */
+    suspend fun draftFrame(
+        kind: String,
+        writing: Writing,
+        recipientName: String,
+        year: Int,
+        title: String,
+        albums: List<String>,
+        lastText: String,
+        instruction: String? = null,
+        previous: String? = null,
+    ): String = call(
+        "draftFrame",
+        mapOf(
+            "kind" to kind, "senderName" to writing.senderName, "recipientName" to recipientName,
+            "year" to year.toString(), "title" to title, "albums" to albums, "lastText" to lastText,
+            "style" to style(writing), "instruction" to instruction, "previous" to previous,
+        ),
+        timeoutSeconds = 120,
+    )["note"] as? String ?: ""
+
+    /** "Fit for them" scores, one per album in order (null where Claude gave none). */
+    suspend fun scoreFit(taste: String, albums: List<Pair<String, String>>): List<Fit?> {
+        val r = call(
+            "scoreFit",
+            mapOf("taste" to taste, "albums" to albums.map { (artist, title) -> mapOf("artist" to artist, "title" to title) }),
+            timeoutSeconds = 120,
+        )
+        return (r["scores"] as? List<*>).orEmpty().map { s ->
+            val m = s as? Map<*, *> ?: return@map null
+            val score = (m["score"] as? Number)?.toInt() ?: return@map null
+            Fit(score, m["reason"] as? String ?: "")
+        }
+    }
+
+    /** Makes a private playlist of the set: every track of each album, in order. Returns its link. */
+    suspend fun makeSetPlaylist(name: String, description: String, albumUris: List<String>): String =
+        call(
+            "spotifySetPlaylist",
+            mapOf("name" to name, "description" to description, "albumUris" to albumUris),
+            timeoutSeconds = 120,
+        )["url"] as? String ?: ""
 
     /** Swaps the token Last.fm handed back for a session key, kept server-side. Returns the username. */
     suspend fun connectLastFm(token: String): String =

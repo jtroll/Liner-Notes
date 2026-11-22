@@ -1,13 +1,16 @@
 "use strict";
 // Liner Notes' Cloud Functions. Everything that needs a secret runs here, so the APK carries only
 // public values. Phase 0: the Last.fm and Spotify sign-in swaps, finding an album on Spotify, and
-// the test playlist that proves POST /playlists/{id}/items works for this app.
+// the test playlist that proves POST /playlists/{id}/items works for this app. Group send: drafting
+// notes with Claude (draftNote, draftFrame), the "fit for them" scores and the set's playlist.
 //
 // Where things live in Firestore:
 //   users/{uid}                 name, lastSeenAt (the app writes these);
 //                               lastfm {username, connectedAt}, spotify {displayName, connectedAt,
 //                               expiresAt} (only these Functions write them; the rules stop the app)
 //   users/{uid}/private/tokens  Last.fm session key, Spotify refresh token. No client can read it.
+//   users/{uid}/sets/{setId}    a group send, as {json, updatedAt} (the app owns these)
+//   users/{uid}/settings/{doc}  "writing": style examples, tone notes, last year's frame notes
 
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { setGlobalOptions } = require("firebase-functions/v2");
@@ -18,6 +21,9 @@ const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestor
 
 const lastfm = require("./lib/lastfm");
 const spotify = require("./lib/spotify");
+const facts = require("./lib/facts");
+const notes = require("./lib/notes");
+const Anthropic = require("@anthropic-ai/sdk");
 
 initializeApp();
 const db = getFirestore();
@@ -30,6 +36,7 @@ const SPOTIFY_CLIENT_ID = defineString("SPOTIFY_CLIENT_ID");
 // Secrets live in Secret Manager only (firebase functions:secrets:set NAME).
 const LASTFM_SHARED_SECRET = defineSecret("LASTFM_SHARED_SECRET");
 const SPOTIFY_CLIENT_SECRET = defineSecret("SPOTIFY_CLIENT_SECRET");
+const ANTHROPIC_API_KEY = defineSecret("ANTHROPIC_API_KEY");
 
 const SPOTIFY_REDIRECT_URI = "linernotes://spotify-callback";
 const SPOTIFY_TOKEN_DAYS = 182; // refresh tokens stop working 6 months after the first sign-in
@@ -57,6 +64,17 @@ function toHttpsError(where, err) {
   logger.error(where, { message: err.message, status: err.status, lastfmCode: err.lastfmCode });
   if (err.lastfmCode === 4 || err.lastfmCode === 14 || err.lastfmCode === 15) {
     return new HttpsError("failed-precondition", "Last.fm didn't accept that approval. Try connecting again.");
+  }
+  if (err instanceof notes.NoteError) {
+    return new HttpsError("failed-precondition", err.message);
+  }
+  if (err instanceof Anthropic.APIError) {
+    if (err.status === 429 || err.status === 529) {
+      return new HttpsError("resource-exhausted", "Claude is busy right now. Try again in a minute.");
+    }
+    if (err.status === 401 || err.status === 403) {
+      return new HttpsError("failed-precondition", "The Claude API key isn't set up yet.");
+    }
   }
   if (err instanceof spotify.SpotifyError) {
     if (err.body && err.body.error === "invalid_grant") {
@@ -168,5 +186,112 @@ exports.spotifyTestPlaylist = onCall({ secrets: [SPOTIFY_CLIENT_SECRET] }, async
     return { url: playlist.external_urls ? playlist.external_urls.spotify : null, id: playlist.id };
   } catch (err) {
     throw toHttpsError("spotifyTestPlaylist", err);
+  }
+});
+
+// Builds the set's playlist: every track of each album, in the set's order.
+exports.spotifySetPlaylist = onCall({ secrets: [SPOTIFY_CLIENT_SECRET], timeoutSeconds: 120 }, async (request) => {
+  const uid = requireUid(request);
+  const name = requireString(request.data, "name", 100);
+  const description = typeof request.data.description === "string" ? request.data.description.slice(0, 300) : "";
+  const albumUris = Array.isArray(request.data.albumUris) ? request.data.albumUris : [];
+  const ids = albumUris.map((u) => /^spotify:album:([A-Za-z0-9]+)$/.exec(String(u))).filter(Boolean).map((m) => m[1]);
+  if (!ids.length || ids.length > 30) throw new HttpsError("invalid-argument", "Pick between 1 and 30 albums on Spotify.");
+  try {
+    const token = await userToken(uid);
+    const uris = [];
+    for (const id of ids) uris.push(...(await spotify.albumTrackUris(token, id)));
+    const playlist = await spotify.createPlaylist(token, name, description);
+    await spotify.addItems(token, playlist.id, uris);
+    return { url: playlist.external_urls ? playlist.external_urls.spotify : null, id: playlist.id, tracks: uris.length };
+  } catch (err) {
+    throw toHttpsError("spotifySetPlaylist", err);
+  }
+});
+
+// ---- Claude --------------------------------------------------------------------------------
+
+const optString = (data, key, max) => (typeof data[key] === "string" ? data[key].trim().slice(0, max) : "");
+const optStrings = (data, key, maxItems, maxLen) =>
+  (Array.isArray(data[key]) ? data[key] : []).filter((s) => typeof s === "string" && s.trim()).slice(0, maxItems).map((s) => s.trim().slice(0, maxLen));
+const optInt = (data, key) => (Number.isFinite(Number(data[key])) ? Math.max(0, Math.round(Number(data[key]))) : 0);
+
+function styleFrom(data) {
+  const s = (data && typeof data.style === "object" && data.style) || {};
+  return {
+    examples: optStrings(s, "examples", 6, 3000),
+    toneNotes: optString(s, "toneNotes", 1000),
+    minWords: optInt(s, "minWords") || 90,
+    maxWords: optInt(s, "maxWords") || 120,
+  };
+}
+
+// One album's note: facts, reviews, Claude's draft in the sender's voice, then the fact check.
+exports.draftNote = onCall({ secrets: [ANTHROPIC_API_KEY], timeoutSeconds: 300, memory: "512MiB" }, async (request) => {
+  requireUid(request);
+  const d = request.data || {};
+  const artist = requireString(d, "artist", 300);
+  const album = requireString(d, "album", 300);
+  try {
+    const found = await facts.gather(LASTFM_API_KEY.value(), artist, album);
+    return await notes.draftNote(ANTHROPIC_API_KEY.value(), {
+      artist,
+      album,
+      senderName: optString(d, "senderName", 80),
+      recipientName: optString(d, "recipientName", 80),
+      taste: optString(d, "taste", 1500),
+      plays: optInt(d, "plays"),
+      weeks: optInt(d, "weeks"),
+      rangeLabel: optString(d, "rangeLabel", 80),
+      favoriteTracks: optStrings(d, "favoriteTracks", 9, 200),
+      isCloser: d.isCloser === true,
+      isMonthly: d.isMonthly === true,
+      style: styleFrom(d),
+      instruction: optString(d, "instruction", 500),
+      previous: optString(d, "previous", 4000),
+      facts: found,
+    });
+  } catch (err) {
+    throw toHttpsError("draftNote", err);
+  }
+});
+
+// The set's intro or closing note, from last year's as a starting point.
+exports.draftFrame = onCall({ secrets: [ANTHROPIC_API_KEY], timeoutSeconds: 120 }, async (request) => {
+  requireUid(request);
+  const d = request.data || {};
+  const kind = d.kind === "closing" ? "closing" : "intro";
+  try {
+    return await notes.draftFrame(ANTHROPIC_API_KEY.value(), {
+      kind,
+      senderName: optString(d, "senderName", 80),
+      recipientName: optString(d, "recipientName", 80),
+      year: optString(d, "year", 10),
+      title: optString(d, "title", 120),
+      albums: optStrings(d, "albums", 30, 300),
+      lastText: optString(d, "lastText", 3000),
+      style: styleFrom(d),
+      instruction: optString(d, "instruction", 500),
+      previous: optString(d, "previous", 3000),
+    });
+  } catch (err) {
+    throw toHttpsError("draftFrame", err);
+  }
+});
+
+// "Fit for them": scores the shortlist against the recipient's taste.
+exports.scoreFit = onCall({ secrets: [ANTHROPIC_API_KEY], timeoutSeconds: 120 }, async (request) => {
+  requireUid(request);
+  const d = request.data || {};
+  const taste = requireString(d, "taste", 1500);
+  const albums = (Array.isArray(d.albums) ? d.albums : [])
+    .filter((a) => a && typeof a.artist === "string" && typeof a.title === "string")
+    .slice(0, 60)
+    .map((a) => ({ artist: a.artist.slice(0, 200), title: a.title.slice(0, 200) }));
+  if (!albums.length) throw new HttpsError("invalid-argument", "No albums to score.");
+  try {
+    return { scores: await notes.fitScores(ANTHROPIC_API_KEY.value(), { taste, albums }) };
+  } catch (err) {
+    throw toHttpsError("scoreFit", err);
   }
 });

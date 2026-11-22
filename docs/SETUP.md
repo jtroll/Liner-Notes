@@ -76,13 +76,16 @@ variable; the shared secret goes in Secret Manager.
 
 ## 5. Secret Manager
 
-Google Cloud console > Security > Secret Manager, same project. Create two secrets:
+Google Cloud console > Security > Secret Manager, same project. Create three secrets:
 
 - `SPOTIFY_CLIENT_SECRET`
 - `LASTFM_SHARED_SECRET`
+- `ANTHROPIC_API_KEY`: a Claude API key for drafting the notes. Make it at
+  [platform.claude.com](https://platform.claude.com) under API keys, and set a monthly spend
+  limit there. A full set of 12 notes with reviews costs a few dollars at most.
 
 (Or on the PC: `firebase functions:secrets:set SPOTIFY_CLIENT_SECRET`, and the same for the
-other.)
+others.) The deploy fails until all three exist, because the Functions name them.
 
 ## 6. Deploy and install
 

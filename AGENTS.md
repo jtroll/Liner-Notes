@@ -20,13 +20,20 @@ stays out of this repository while the repository is public.
 ## Rules
 
 - Never commit a secret. Secrets live in GitHub secrets (CI) and Secret Manager (Functions).
-- Everything that needs a secret is a Cloud Function. The app reads Last.fm's public
-  `user.getTopAlbums` itself with the public API key.
+- Everything that needs a secret is a Cloud Function. The app reads Last.fm's public methods
+  (`user.getTopAlbums`, the weekly charts, `album.getInfo`) itself with the public API key.
 - Spotify after February 2026: `POST /me/playlists`, `POST /playlists/{id}/items`, search
   `limit` at most 10, refresh tokens last 6 months, Development Mode allows 5 users. Check the
   live docs before adding an endpoint.
 - Firestore: only Functions write `users/{uid}.lastfm`, `.spotify` and `.role`; tokens live in
-  `users/{uid}/private/*`, which no client can read.
+  `users/{uid}/private/*`, which no client can read. Group sets (`users/{uid}/sets/{id}`) and
+  writing settings (`users/{uid}/settings/writing`) are the owner's, stored as one `json` field.
+- Claude calls live in `functions/lib/notes.js`: Opus 5.5 (`claude-opus-5-5`, effort medium,
+  server-side `fallbacks: "default"`, web search) drafts; Haiku 5.5 (`claude-haiku-5-5`) does the
+  cheap fact check and fit scores. Keep the prompts generic (no names of real people) and keep
+  their builders pure so `functions/test/notes.test.js` covers them.
+- The app reads Last.fm's weekly charts itself for the group-send shortlist and favorite tracks
+  (`LastFm.rangeCharts`, ranked in `data/Ranking.kt`).
 
 ## Design system
 
