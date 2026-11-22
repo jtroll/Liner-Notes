@@ -1,0 +1,29 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+.kotlin/
+
+# Signing and secrets: never commit
+*.keystore
+*.jks
+keystore.properties
+linernotes.local.properties
+service-account*.json
+.env
+.runtimeconfig.json
+
+# Functions
+functions/node_modules/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.claude/settings.local.json

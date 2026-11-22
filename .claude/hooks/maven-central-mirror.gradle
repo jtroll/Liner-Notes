@@ -1,0 +1,16 @@
+// Copied into ~/.gradle/init.d by .claude/hooks/session-start.sh, in cloud sessions only.
+// repo.maven.apache.org answers those containers' shared address with 429 Too Many Requests,
+// and Google's mirror of Maven Central does not, so any repository that points at Central is
+// read from the mirror instead. The build itself (settings.gradle.kts) is unchanged.
+def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+def redirect = { RepositoryHandler repos ->
+    repos.withType(MavenArtifactRepository).configureEach { repo ->
+        if (repo.url.toString().startsWith('https://repo.maven.apache.org/maven2')) repo.url = mirror
+    }
+}
+beforeSettings { settings ->
+    redirect(settings.buildscript.repositories)
+    redirect(settings.pluginManagement.repositories)
+    redirect(settings.dependencyResolutionManagement.repositories)
+}
+allprojects { redirect(buildscript.repositories) }

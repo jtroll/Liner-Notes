@@ -1,0 +1,77 @@
+name: Backend
+
+# Tests the Cloud Functions on every push that touches the backend, and on a push to main deploys
+# Functions, Firestore rules and Hosting (the Last.fm callback page). The deploy skips with a
+# notice until the Firebase project exists (docs/SETUP.md).
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'functions/**'
+      - 'firestore.rules'
+      - 'firebase.json'
+      - 'hosting/**'
+      - 'app/google-services.json'
+      - '.github/workflows/backend.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Functions tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Syntax check
+        working-directory: functions
+        run: for f in *.js lib/*.js test/*.js; do node --check "$f"; done
+      - name: Unit tests
+        working-directory: functions
+        run: npm test
+
+  deploy:
+    name: Deploy Functions, rules and Hosting
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Deploy
+        env:
+          SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          PROJECT_VAR: ${{ vars.FIREBASE_PROJECT_ID }}
+          SPOTIFY_CLIENT_ID: ${{ vars.SPOTIFY_CLIENT_ID }}
+          LASTFM_API_KEY: ${{ vars.LASTFM_API_KEY }}
+        run: |
+          set -euo pipefail
+          project="${PROJECT_VAR:-}"
+          if [ -z "$project" ] && [ -f app/google-services.json ]; then
+            project=$(jq -r '.project_info.project_id // empty' app/google-services.json)
+          fi
+          if [ -z "$project" ] || [ -z "${SERVICE_ACCOUNT:-}" ]; then
+            echo "::notice::Deploy skipped: it needs the Firebase project (app/google-services.json or the FIREBASE_PROJECT_ID variable) and the FIREBASE_SERVICE_ACCOUNT secret (docs/SETUP.md)."
+            exit 0
+          fi
+          # Public values only. The two secrets live in Secret Manager.
+          printf 'SPOTIFY_CLIENT_ID=%s\nLASTFM_API_KEY=%s\n' "$SPOTIFY_CLIENT_ID" "$LASTFM_API_KEY" > functions/.env
+          (cd functions && npm ci --no-audit --no-fund)
+          printf '%s' "$SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          npx --yes firebase-tools@15 deploy --project "$project" \
+            --only functions,firestore:rules,hosting --non-interactive --force
+          rm -f "$RUNNER_TEMP/sa.json" functions/.env

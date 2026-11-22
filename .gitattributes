@@ -1,0 +1,22 @@
+# Normalize line endings so Linux CI and Windows dev agree.
+* text=auto eol=lf
+
+# Windows-only launcher must keep CRLF.
+*.bat text eol=crlf
+
+# The Gradle wrapper script must stay LF or it won't run on the CI runner.
+gradlew text eol=lf
+
+# Treat these as binary (no eol munging, no diff noise).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ttf binary
+*.otf binary
+*.jar binary
+*.keystore binary
+*.jks binary
+# The photo enlarger's models (tools/photo-sharpen).
+*.tflite binary
+*.onnx binary
