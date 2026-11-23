@@ -148,4 +148,8 @@ data class Writing(
     val maxWords: Int = 120,
     val lastIntro: String = "",
     val lastClosing: String = "",
+    /** Earlier years' lists, so albums already given are marked and notes can mention them. */
+    val pastLists: List<PastList> = emptyList(),
+    /** Albums held back from monthly sends for a group send. */
+    val saved: List<SavedAlbum> = emptyList(),
 )

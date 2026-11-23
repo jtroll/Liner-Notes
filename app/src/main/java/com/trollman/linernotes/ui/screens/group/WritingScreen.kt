@@ -29,6 +29,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.sp
+import com.trollman.linernotes.data.History
+import com.trollman.linernotes.data.PastList
+import com.trollman.linernotes.ui.theme.mono
+import java.time.LocalDate
 import androidx.compose.ui.unit.dp
 import com.trollman.linernotes.data.Writing
 import com.trollman.linernotes.ui.system.Panel
@@ -38,7 +44,8 @@ import com.trollman.linernotes.ui.theme.liner
 
 /**
  * The sender's writing settings (SPEC.md, "Template settings"): past write-ups as style examples,
- * tone notes, target length, and last year's intro and closing as starting points.
+ * tone notes, target length, last year's intro and closing as starting points, earlier years'
+ * lists (so albums already given are marked), and albums saved for later.
  */
 @Composable
 fun WritingScreen(writing: Writing, onChange: (Writing) -> Unit, onBack: () -> Unit) {
@@ -140,6 +147,115 @@ fun WritingScreen(writing: Writing, onChange: (Writing) -> Unit, onBack: () -> U
             minLines = 3,
             modifier = Modifier.fillMaxWidth(),
         )
+
+        Spacer(Modifier.height(16.dp))
+        SectionLabel("Earlier lists")
+        Text(
+            "Paste an earlier year's list, one album to a line, like \"Artist — Album\". Albums on it are marked as already given, and notes can mention when an artist was on an earlier list.",
+            style = MaterialTheme.typography.bodySmall,
+            color = c.inkSoft,
+        )
+        Spacer(Modifier.height(8.dp))
+        w.pastLists.forEach { list ->
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "${list.year}${if (list.forName.isNotBlank()) " · for ${list.forName}" else ""}",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = c.ink,
+                    )
+                    Text(
+                        list.albums.joinToString(", ") { it.title },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = c.inkSoft,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                IconKey(Icons.Rounded.Close, "Remove the ${list.year} list", onClick = { update(w.copy(pastLists = w.pastLists - list)) })
+            }
+        }
+        var year by remember { mutableStateOf((LocalDate.now().year - 1).toString()) }
+        var forName by remember { mutableStateOf("") }
+        var pasted by remember { mutableStateOf("") }
+        val parsed = remember(pasted) { History.parseList(pasted) }
+        Panel {
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = year,
+                    onValueChange = { year = it.filter(Char::isDigit).take(4) },
+                    label = { Text("Year") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(0.4f),
+                )
+                OutlinedTextField(
+                    value = forName,
+                    onValueChange = { forName = it },
+                    label = { Text("For (optional)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(0.6f),
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = pasted,
+                onValueChange = { pasted = it },
+                label = { Text("The list") },
+                minLines = 4,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                if (pasted.isBlank()) "" else "READ ${parsed.size} ALBUMS",
+                style = mono(10.sp),
+                color = c.inkFaint,
+            )
+            Spacer(Modifier.height(6.dp))
+            val y = year.toIntOrNull()
+            PhysicalTextButton(
+                "Add this list",
+                {
+                    if (y != null) {
+                        val others = w.pastLists.filterNot {
+                            it.year == y && (History.sameName(it.forName, forName) || (it.forName.isBlank() && forName.isBlank()))
+                        }
+                        update(w.copy(pastLists = (others + PastList(y, forName.trim(), parsed)).sortedByDescending { it.year }))
+                        pasted = ""
+                    }
+                },
+                Modifier.fillMaxWidth(),
+                enabled = y != null && y in 1990..2100 && parsed.isNotEmpty(),
+            )
+            Spacer(Modifier.height(12.dp))
+        }
+
+        if (w.saved.isNotEmpty()) {
+            Spacer(Modifier.height(16.dp))
+            SectionLabel("Saved for later · ${w.saved.size}")
+            Text(
+                "Held back from monthly suggestions and put at the top of group-send shortlists.",
+                style = MaterialTheme.typography.bodySmall,
+                color = c.inkSoft,
+            )
+            w.saved.forEach { saved ->
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text(saved.album.title, style = MaterialTheme.typography.titleSmall, color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            saved.album.artist + if (saved.forName.isNotBlank()) " · for ${saved.forName}" else "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = c.inkSoft,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    IconKey(Icons.Rounded.Close, "Stop saving ${saved.album.title}", onClick = { update(w.copy(saved = w.saved - saved)) })
+                }
+            }
+        }
         Spacer(Modifier.height(40.dp))
     }
 }

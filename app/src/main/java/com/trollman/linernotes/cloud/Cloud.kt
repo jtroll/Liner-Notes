@@ -11,6 +11,7 @@ import com.google.firebase.messaging.FirebaseMessaging
 import android.util.Log
 import com.trollman.linernotes.data.Candidate
 import com.trollman.linernotes.data.Fit
+import com.trollman.linernotes.data.History
 import com.trollman.linernotes.data.PairInfo
 import com.trollman.linernotes.data.Pick
 import com.trollman.linernotes.data.Reaction
@@ -80,6 +81,7 @@ class Cloud {
         previous: String? = null,
         isMonthly: Boolean = false,
         connection: String? = null,
+        earlierLists: List<History.Mention> = emptyList(),
     ): Draft {
         val r = call(
             "draftNote",
@@ -90,6 +92,7 @@ class Cloud {
                 "favoriteTracks" to favoriteTracks, "isCloser" to isCloser,
                 "style" to style(writing), "instruction" to instruction, "previous" to previous,
                 "isMonthly" to isMonthly, "connection" to connection,
+                "earlierLists" to earlierLists.map { mapOf("year" to it.year.toString(), "artistOnly" to it.artistOnly) },
             ),
             timeoutSeconds = 300,
         )

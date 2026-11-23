@@ -52,6 +52,7 @@ import androidx.compose.ui.unit.sp
 import com.trollman.linernotes.GroupSendViewModel
 import com.trollman.linernotes.GroupState
 import com.trollman.linernotes.data.GroupSet
+import com.trollman.linernotes.data.History
 import com.trollman.linernotes.data.NoteState
 import com.trollman.linernotes.data.SetAlbum
 import com.trollman.linernotes.data.SetEntry
@@ -155,10 +156,12 @@ private fun androidx.compose.foundation.lazy.LazyListScope.pickTab(set: GroupSet
     item(key = "list-label") {
         SectionLabel(if (set.entries.isEmpty()) "Your list · tap albums below to add them" else "Your list")
     }
+    val givenBefore = state.given(set)
     itemsIndexed(set.entries, key = { _, e -> "picked:${e.key}" }) { i, e ->
         PickedRow(
             index = i,
             entry = e,
+            mark = givenBefore[History.matchKey(e.album)],
             last = i == set.entries.lastIndex,
             onUp = { vm.move(set.id, i, -1) },
             onDown = { vm.move(set.id, i, 1) },
@@ -196,8 +199,15 @@ private fun androidx.compose.foundation.lazy.LazyListScope.pickTab(set: GroupSet
         }
     }
     val pickedKeys = set.entries.map { it.key }.toSet()
+    val given = state.given(set)
     itemsIndexed(set.shortlist, key = { _, a -> "short:${a.key}" }) { _, a ->
-        ShortlistRow(a, picked = a.key in pickedKeys, fit = set.fit[a.key], onToggle = { vm.togglePick(set.id, a) })
+        ShortlistRow(
+            a,
+            picked = a.key in pickedKeys,
+            fit = set.fit[a.key],
+            mark = given[History.matchKey(a)] ?: if (state.isSaved(a)) "SAVED FOR LATER" else null,
+            onToggle = { vm.togglePick(set.id, a) },
+        )
     }
 }
 
@@ -240,7 +250,7 @@ private fun TastePanel(set: GroupSet, state: GroupState, vm: GroupSendViewModel)
 }
 
 @Composable
-private fun PickedRow(index: Int, entry: SetEntry, last: Boolean, onUp: () -> Unit, onDown: () -> Unit, onRemove: () -> Unit) {
+private fun PickedRow(index: Int, entry: SetEntry, mark: String?, last: Boolean, onUp: () -> Unit, onDown: () -> Unit, onRemove: () -> Unit) {
     val c = liner
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text((index + 1).toString().padStart(2, '0'), style = mono(14.sp), color = c.signal, modifier = Modifier.width(28.dp))
@@ -249,6 +259,7 @@ private fun PickedRow(index: Int, entry: SetEntry, last: Boolean, onUp: () -> Un
         Column(Modifier.weight(1f)) {
             Text(entry.album.title, style = MaterialTheme.typography.titleSmall, color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(entry.album.artist, style = MaterialTheme.typography.bodySmall, color = c.inkSoft, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (mark != null) Text("ALREADY GIVEN · $mark", style = mono(10.sp), color = c.signal, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             IconKey(Icons.Rounded.KeyboardArrowUp, "Move ${entry.album.title} up", onClick = onUp, enabled = index > 0)
@@ -259,7 +270,7 @@ private fun PickedRow(index: Int, entry: SetEntry, last: Boolean, onUp: () -> Un
 }
 
 @Composable
-private fun ShortlistRow(album: SetAlbum, picked: Boolean, fit: com.trollman.linernotes.data.Fit?, onToggle: () -> Unit) {
+private fun ShortlistRow(album: SetAlbum, picked: Boolean, fit: com.trollman.linernotes.data.Fit?, mark: String?, onToggle: () -> Unit) {
     val c = liner
     Row(
         Modifier
@@ -280,6 +291,7 @@ private fun ShortlistRow(album: SetAlbum, picked: Boolean, fit: com.trollman.lin
                 if (fit != null) add("FIT ${fit.score}")
             }
             if (stats.isNotEmpty()) Text(stats.joinToString(" · "), style = mono(10.sp), color = if (fit != null && fit.score >= 70) c.signal else c.inkFaint)
+            if (mark != null) Text(mark, style = mono(10.sp), color = c.signal, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (fit != null && fit.reason.isNotBlank()) {
                 Text(fit.reason, style = MaterialTheme.typography.bodySmall, color = c.inkSoft, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }

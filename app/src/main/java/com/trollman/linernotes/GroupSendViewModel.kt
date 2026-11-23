@@ -7,6 +7,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.firebase.functions.FirebaseFunctionsException
 import com.trollman.linernotes.data.Candidate
+import com.trollman.linernotes.data.History
+import com.trollman.linernotes.data.SavedAlbum
 import com.trollman.linernotes.data.CloudSetStore
 import com.trollman.linernotes.data.Invite
 import com.trollman.linernotes.data.Monthly
@@ -90,6 +92,16 @@ data class GroupState(
         (inbox.filter { it.pairId == pairId && !it.test } +
             sendsById.values.filter { it.pairId == pairId && it.delivered && !it.test }.mapNotNull { it.asReceived() })
             .sortedByDescending { it.deliveredAt }
+
+    /** Albums already given to whoever [set] is for (sends and earlier lists), by History.matchKey. */
+    fun given(set: GroupSet): Map<String, String> =
+        History.given(writing.pastLists, sendsById.values, set.forName, set.pairId, set.id) { Monthly.monthName(it) }
+
+    /** Albums saved for later for [forName] (or for anyone). */
+    fun savedFor(forName: String): List<SavedAlbum> =
+        writing.saved.filter { it.forName.isBlank() || History.sameName(it.forName, forName) }
+
+    fun isSaved(album: SetAlbum): Boolean = writing.saved.any { History.matchKey(it.album) == History.matchKey(album) }
 }
 
 /**
@@ -212,7 +224,12 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
                 val weeks = lastFm.rangeCharts(user, from, to, onProgress = { done, total ->
                     _state.update { it.copy(progress = done to total) }
                 }) { u, f, t -> weeklyAlbumChart(u, f, t) }
-                val ranked = Ranking.rank(Ranking.aggregate(weeks))
+                val saved = _state.value.savedFor(s.forName).map { it.album }
+                val savedKeys = saved.map { History.matchKey(it) }.toSet()
+                val inRange = Ranking.rank(Ranking.aggregate(weeks))
+                // Saved for later comes first, with its plays in the range where it has them.
+                val ranked = saved.map { a -> inRange.firstOrNull { History.matchKey(it) == History.matchKey(a) } ?: a } +
+                    inRange.filter { History.matchKey(it) !in savedKeys }
                 edit(id) { it.copy(shortlist = ranked) }
                 if (ranked.isEmpty()) say("Nothing in that stretch on Last.fm. Is Spotify scrobbling to it?")
                 fillCovers(id, ranked)
@@ -362,6 +379,7 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
                 previous = entry.note.takeIf { instruction != null && it.isNotBlank() },
                 isMonthly = s.isMonthly,
                 connection = entry.connection.ifBlank { null },
+                earlierLists = History.earlierMentions(w.pastLists, s.forName, entry.album),
             )
             if (draft.note.isBlank()) {
                 say("The draft for ${entry.album.title} came back empty. Try again.")
@@ -648,7 +666,10 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
             busy(key, true)
             try {
                 val listening = Monthly.listeningMonth(month)
-                val candidates = monthlyCandidates(user, listening)
+                // Leave out what they've already been given and what's saved for a group send.
+                val st = _state.value
+                val exclude = st.given(s).keys + st.writing.saved.map { History.matchKey(it.album) }
+                val candidates = monthlyCandidates(user, listening, exclude)
                 if (candidates.isEmpty()) {
                     say("Nothing played heavily in ${Monthly.monthName(listening)} or the months before. Search for any album instead.")
                     return@launch
@@ -672,18 +693,19 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun monthlyCandidates(user: String, listening: YearMonth): List<Candidate> {
+    private suspend fun monthlyCandidates(user: String, listening: YearMonth, exclude: Set<String>): List<Candidate> {
+        fun List<SetAlbum>.fresh() = filter { History.matchKey(it) !in exclude }
         val zone = ZoneId.systemDefault()
         val end = listening.plusMonths(1).atDay(1).atStartOfDay(zone).toEpochSecond()
         val start = listening.atDay(1).atStartOfDay(zone).toEpochSecond()
         val last = Ranking.aggregate(lastFm.rangeCharts(user, start, end, onProgress = { d, t ->
             _state.update { it.copy(progress = d to t) }
-        }) { u, f, t -> weeklyAlbumChart(u, f, t) })
+        }) { u, f, t -> weeklyAlbumChart(u, f, t) }).fresh()
         val tracks = trackCounts(last.filter { it.plays < Monthly.MIN_TRACK_PLAYS }.sortedByDescending { it.plays }.take(15))
         val recent = Monthly.candidates(last, null, tracks)
         if (recent.size >= Monthly.MIN_CANDIDATES) return recent
         val quarterStart = listening.minusMonths(2).atDay(1).atStartOfDay(zone).toEpochSecond()
-        val quarter = Ranking.aggregate(lastFm.rangeCharts(user, quarterStart, end) { u, f, t -> weeklyAlbumChart(u, f, t) })
+        val quarter = Ranking.aggregate(lastFm.rangeCharts(user, quarterStart, end) { u, f, t -> weeklyAlbumChart(u, f, t) }).fresh()
         val more = trackCounts(quarter.filter { it.plays < Monthly.MIN_TRACK_PLAYS }.sortedByDescending { it.plays }.take(15))
         return Monthly.candidates(last, quarter, tracks + more)
     }
@@ -800,6 +822,17 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ---- Writing settings -----------------------------------------------------------------------
+
+    /** Holds an album back from monthly sends and puts it at the top of group-send shortlists. */
+    fun toggleSaved(album: SetAlbum, forName: String) {
+        val w = _state.value.writing
+        val key = History.matchKey(album)
+        val has = w.saved.any { History.matchKey(it.album) == key }
+        saveWriting(
+            w.copy(saved = if (has) w.saved.filterNot { History.matchKey(it.album) == key } else w.saved + SavedAlbum(album.copy(plays = 0, weeks = 0), forName.trim()))
+        )
+        say(if (has) "${album.title} is no longer saved for later." else "Saved ${album.title} for a group send to ${forName.ifBlank { "anyone" }}.")
+    }
 
     fun saveWriting(writing: Writing) {
         _state.update { it.copy(writing = writing) }

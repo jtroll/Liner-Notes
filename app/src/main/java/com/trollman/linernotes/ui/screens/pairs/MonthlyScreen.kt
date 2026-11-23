@@ -47,6 +47,7 @@ import com.trollman.linernotes.GroupSendViewModel
 import com.trollman.linernotes.GroupState
 import com.trollman.linernotes.data.Album
 import com.trollman.linernotes.data.GroupSet
+import com.trollman.linernotes.data.History
 import com.trollman.linernotes.data.Monthly
 import com.trollman.linernotes.data.PairInfo
 import com.trollman.linernotes.data.Pick
@@ -173,6 +174,15 @@ fun MonthlyScreen(
                     if (entry.connection.isNotBlank()) {
                         Spacer(Modifier.height(6.dp))
                         Text(entry.connection, style = MaterialTheme.typography.bodyMedium, color = c.ink)
+                    }
+                    state.given(set)[History.matchKey(entry.album)]?.let { mark ->
+                        Spacer(Modifier.height(6.dp))
+                        Text("ALREADY GIVEN · $mark", style = mono(10.sp), color = c.signal)
+                    }
+                    if (sent == null) {
+                        TextButton(onClick = { vm.toggleSaved(entry.album, name) }) {
+                            Text(if (state.isSaved(entry.album)) "Saved for a group send · undo" else "Save it for a group send instead")
+                        }
                     }
                 }
             }
@@ -331,7 +341,8 @@ private fun SearchPanel(set: GroupSet, state: GroupState, vm: GroupSendViewModel
         if (results != null) {
             Spacer(Modifier.height(8.dp))
             if (results.isEmpty()) Text("Nothing found.", style = MaterialTheme.typography.bodySmall, color = c.inkSoft)
-            results.forEach { a -> SearchRow(a, onClick = { vm.choose(set.id, Pick(a)); vm.clearSearch(); query = "" }) }
+            val given = state.given(set)
+            results.forEach { a -> SearchRow(a, given[History.matchKey(a)], onClick = { vm.choose(set.id, Pick(a)); vm.clearSearch(); query = "" }) }
             Spacer(Modifier.height(4.dp))
             PhysicalButton({ vm.clearSearch() }, Modifier.size(38.dp), shape = RoundedCornerShape(10.dp), contentDescription = "Clear the search") {
                 androidx.compose.material3.Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(20.dp))
@@ -342,7 +353,7 @@ private fun SearchPanel(set: GroupSet, state: GroupState, vm: GroupSendViewModel
 }
 
 @Composable
-private fun SearchRow(a: SetAlbum, onClick: () -> Unit) {
+private fun SearchRow(a: SetAlbum, mark: String?, onClick: () -> Unit) {
     val c = liner
     Row(
         Modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onClick).padding(vertical = 6.dp),
@@ -353,6 +364,7 @@ private fun SearchRow(a: SetAlbum, onClick: () -> Unit) {
         Column(Modifier.weight(1f)) {
             Text(a.title, style = MaterialTheme.typography.titleSmall, color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(a.artist, style = MaterialTheme.typography.bodySmall, color = c.inkSoft, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (mark != null) Text("ALREADY GIVEN · $mark", style = mono(10.sp), color = c.signal, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
