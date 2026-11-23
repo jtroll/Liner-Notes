@@ -7,8 +7,10 @@
 // Where things live in Firestore:
 //   users/{uid}                 name, lastSeenAt (the app writes these);
 //                               lastfm {username, connectedAt}, spotify {displayName, connectedAt,
-//                               expiresAt} (only these Functions write them; the rules stop the app)
-//   users/{uid}/private/tokens  Last.fm session key, Spotify refresh token. No client can read it.
+//                               expiresAt, expired, remindedSoonFor, remindedExpiredFor} (only these
+//                               Functions write them; the rules stop the app)
+//   users/{uid}/private/tokens  Last.fm session key, Spotify refresh token, and runningPlaylists
+//                               {senderUid: {id, url}}. No client can read it.
 //   users/{uid}/sets/{setId}    a group send, as {json, updatedAt} (the app owns these)
 //   users/{uid}/settings/{doc}  "writing": style examples, tone notes, last year's frame notes
 //   users/{uid}.fcmTokens       the phone's push tokens (the app adds them; these Functions prune)
@@ -24,6 +26,8 @@
 //                               Monthly sends (kind "monthly", month "yyyy-mm") have the id
 //                               uid_myyyymm_<pair hash>, one per person, pair and month.
 //                               reactions {index: {reaction, comment, at}} come from the recipient.
+//                               playlist {state, url, missing, reason, at}: how adding the albums
+//                               to the recipient's Spotify went (done, failed, notConnected).
 
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
@@ -33,6 +37,7 @@ const logger = require("firebase-functions/logger");
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestore");
 const { getMessaging } = require("firebase-admin/messaging");
+const { getAuth } = require("firebase-admin/auth");
 
 const lastfm = require("./lib/lastfm");
 const spotify = require("./lib/spotify");
@@ -41,6 +46,7 @@ const notes = require("./lib/notes");
 const sends = require("./lib/sends");
 const monthly = require("./lib/monthly");
 const influence = require("./lib/influence");
+const polish = require("./lib/polish");
 const crypto = require("node:crypto");
 const Anthropic = require("@anthropic-ai/sdk");
 
@@ -58,7 +64,7 @@ const SPOTIFY_CLIENT_SECRET = defineSecret("SPOTIFY_CLIENT_SECRET");
 const ANTHROPIC_API_KEY = defineSecret("ANTHROPIC_API_KEY");
 
 const SPOTIFY_REDIRECT_URI = "linernotes://spotify-callback";
-const SPOTIFY_TOKEN_DAYS = 182; // refresh tokens stop working 6 months after the first sign-in
+const SPOTIFY_TOKEN_DAYS = polish.SPOTIFY_TOKEN_DAYS; // refresh tokens stop working 6 months after the first sign-in
 
 function requireUid(request) {
   const uid = request.auth && request.auth.uid;
@@ -125,7 +131,7 @@ exports.lastfmConnect = onCall({ secrets: [LASTFM_SHARED_SECRET] }, async (reque
 
 // ---- Spotify -------------------------------------------------------------------------------
 
-exports.spotifyConnect = onCall({ secrets: [SPOTIFY_CLIENT_SECRET] }, async (request) => {
+exports.spotifyConnect = onCall({ secrets: [SPOTIFY_CLIENT_SECRET], timeoutSeconds: 180 }, async (request) => {
   const uid = requireUid(request);
   const code = requireString(request.data, "code");
   const redirectUri = (request.data && request.data.redirectUri) || SPOTIFY_REDIRECT_URI;
@@ -140,8 +146,9 @@ exports.spotifyConnect = onCall({ secrets: [SPOTIFY_CLIENT_SECRET] }, async (req
       { merge: true },
     );
     const displayName = profile.display_name || profile.id;
-    await userDoc(uid).set({ spotify: { displayName, connectedAt: now, expiresAt } }, { merge: true });
-    return { displayName };
+    await userDoc(uid).set({ spotify: { displayName, connectedAt: now, expiresAt, expired: false } }, { merge: true });
+    const caughtUp = await catchUpPlaylists(uid);
+    return { displayName, caughtUp };
   } catch (err) {
     throw toHttpsError("spotifyConnect", err);
   }
@@ -152,7 +159,16 @@ async function userToken(uid) {
   const snap = await tokensDoc(uid).get();
   const refreshToken = snap.exists ? snap.get("spotifyRefreshToken") : null;
   if (!refreshToken) throw new HttpsError("failed-precondition", "Connect Spotify first.");
-  const body = await spotify.refresh(SPOTIFY_CLIENT_ID.value(), SPOTIFY_CLIENT_SECRET.value(), refreshToken);
+  let body;
+  try {
+    body = await spotify.refresh(SPOTIFY_CLIENT_ID.value(), SPOTIFY_CLIENT_SECRET.value(), refreshToken);
+  } catch (err) {
+    // The six months are up: the app shows "reconnect" from this, and reminders stop.
+    if (err.body && err.body.error === "invalid_grant") {
+      await userDoc(uid).set({ spotify: { expired: true } }, { merge: true }).catch(() => {});
+    }
+    throw err;
+  }
   if (body.refresh_token && body.refresh_token !== refreshToken) {
     await tokensDoc(uid).set({ spotifyRefreshToken: body.refresh_token }, { merge: true });
   }
@@ -420,9 +436,133 @@ async function deliver(ref) {
     tx.update(ref, { status: "delivered", deliveredAt: FieldValue.serverTimestamp() });
     return d;
   });
-  if (delivered) await notifyDelivered(ref.id, delivered);
+  if (delivered) {
+    await notifyDelivered(ref.id, delivered);
+    await toRecipientSpotify(ref);
+  }
   return !!delivered;
 }
+
+// ---- Playlists in the recipient's Spotify ---------------------------------------------------
+//
+// When a send is delivered and the recipient has connected Spotify, its albums go into their own
+// account too (SPEC.md, "Delivery and the recipient's side"): each month's pick is added to a
+// running playlist named for the sender ("From J.T."), and a group send gets a playlist of its own
+// in the booklet's order. The send records how it went in `playlist`, so the sender sees a failure
+// with Retry. A failure never holds a send back: it has already arrived with its notes and links.
+
+/** The Spotify album id for a booklet album: the one the sender's app found, or a search. */
+async function albumIdFor(token, album) {
+  const m = /^spotify:album:([A-Za-z0-9]+)$/.exec(album.spotifyUri || "");
+  if (m) return m[1];
+  const hit = await spotify.findAlbum(token, album.artist, album.title);
+  return hit ? hit.id : null;
+}
+
+/**
+ * Adds tracks to the recipient's running playlist for this sender, making it the first time (or
+ * again, if they deleted it). The playlist's id is kept in the recipient's private tokens doc.
+ */
+async function addToRunning(token, recipientUid, senderUid, fromName, uris) {
+  const snap = await tokensDoc(recipientUid).get();
+  const saved = snap.exists ? (snap.get("runningPlaylists") || {})[senderUid] : null;
+  if (saved && saved.id) {
+    try {
+      await spotify.addItems(token, saved.id, uris);
+      return saved.url || null;
+    } catch (err) {
+      if (!polish.playlistGone(err)) throw err;
+      logger.info("running playlist gone, making a new one", { recipientUid });
+    }
+  }
+  const p = await spotify.createPlaylist(token, polish.runningName(fromName), polish.runningDescription(fromName));
+  const url = p.external_urls ? p.external_urls.spotify : null;
+  await tokensDoc(recipientUid).set({ runningPlaylists: { [senderUid]: { id: p.id, url } } }, { merge: true });
+  await spotify.addItems(token, p.id, uris);
+  return url;
+}
+
+/** Puts a delivered send's albums in the recipient's Spotify and records how it went. Never throws. */
+async function toRecipientSpotify(ref) {
+  let record;
+  try {
+    const snap = await ref.get();
+    if (!snap.exists) return null;
+    const d = snap.data();
+    if (d.status !== "delivered" || !d.recipientUid || d.test === true) return null;
+    const tokens = await tokensDoc(d.recipientUid).get();
+    if (!tokens.exists || !tokens.get("spotifyRefreshToken")) {
+      record = polish.playlistRecord("notConnected");
+    } else {
+      const token = await userToken(d.recipientUid);
+      const booklet = JSON.parse(d.booklet);
+      const uris = [];
+      const missing = [];
+      for (const e of booklet.entries || []) {
+        const id = await albumIdFor(token, e.album);
+        if (!id) {
+          missing.push(e.album.title);
+          continue;
+        }
+        uris.push(...(await spotify.albumTrackUris(token, id)));
+      }
+      if (!uris.length) throw Object.assign(new Error("no albums found"), { notFound: true });
+      let url;
+      if (d.kind === "monthly") {
+        url = await addToRunning(token, d.recipientUid, d.senderUid, d.fromName, uris);
+      } else {
+        const count = (booklet.entries || []).length;
+        const p = await spotify.createPlaylist(token, polish.setName(booklet.title), polish.setDescription(d.fromName, count));
+        await spotify.addItems(token, p.id, uris);
+        url = p.external_urls ? p.external_urls.spotify : null;
+      }
+      record = polish.playlistRecord("done", { url, missing });
+    }
+  } catch (err) {
+    logger.warn("toRecipientSpotify", { sendId: ref.id, message: err.message, status: err.status });
+    record = polish.playlistRecord("failed", { reason: polish.failureReason(err) });
+  }
+  await ref.update({ playlist: record }).catch((err) => logger.warn("playlist record", { message: err.message }));
+  return record;
+}
+
+/** After someone connects (or reconnects) Spotify: the sends that missed their playlist, newest first. */
+async function catchUpPlaylists(uid) {
+  try {
+    const snap = await db.collection("sends").where("recipientUid", "==", uid).get();
+    const behind = snap.docs
+      .filter((doc) => doc.get("status") === "delivered" && doc.get("test") !== true)
+      .filter((doc) => {
+        const p = doc.get("playlist");
+        return !p || p.state === "notConnected" || p.state === "failed";
+      })
+      .sort((a, b) => (b.get("deliveredAt")?.toMillis() || 0) - (a.get("deliveredAt")?.toMillis() || 0))
+      .slice(0, 12)
+      .reverse(); // oldest first, so the running playlist keeps the order they arrived in
+    let done = 0;
+    for (const doc of behind) {
+      const r = await toRecipientSpotify(doc.ref);
+      if (r && r.state === "done") done++;
+    }
+    return done;
+  } catch (err) {
+    logger.warn("catchUpPlaylists", { message: err.message });
+    return 0;
+  }
+}
+
+// Retry from either side of a send, after a failure.
+exports.retryPlaylist = onCall({ secrets: [SPOTIFY_CLIENT_SECRET], timeoutSeconds: 180 }, async (request) => {
+  const uid = requireUid(request);
+  const ref = sendDoc(requireString(request.data, "sendId", 200));
+  const snap = await ref.get();
+  if (!snap.exists || (snap.get("senderUid") !== uid && snap.get("recipientUid") !== uid)) {
+    throw new HttpsError("not-found", "That send isn't one of yours.");
+  }
+  if (snap.get("status") !== "delivered") throw new HttpsError("failed-precondition", "It hasn't been delivered yet.");
+  if ((snap.get("playlist") || {}).state === "done") return snap.get("playlist");
+  return await toRecipientSpotify(ref);
+});
 
 exports.createInvite = onCall(async (request) => {
   const uid = requireUid(request);
@@ -462,7 +602,7 @@ exports.inviteInfo = onCall(async (request) => {
   };
 });
 
-exports.acceptInvite = onCall(async (request) => {
+exports.acceptInvite = onCall({ secrets: [SPOTIFY_CLIENT_SECRET], timeoutSeconds: 180 }, async (request) => {
   const uid = requireUid(request);
   const token = request.data && request.data.token;
   if (!sends.isToken(token)) throw new HttpsError("invalid-argument", "That isn't an invite link.");
@@ -508,7 +648,7 @@ exports.acceptInvite = onCall(async (request) => {
 });
 
 // Schedules (or reschedules, with the latest version of the set) a set for delivery.
-exports.scheduleSend = onCall(async (request) => {
+exports.scheduleSend = onCall({ secrets: [SPOTIFY_CLIENT_SECRET], timeoutSeconds: 180 }, async (request) => {
   const uid = requireUid(request);
   const d = request.data || {};
   const setId = requireString(d, "setId", 64);
@@ -597,7 +737,7 @@ exports.cancelSend = onCall(async (request) => {
 
 // Every 15 minutes: deliver whatever has come due. Needs the (status, deliverAt) index in
 // firestore.indexes.json.
-exports.deliverDueSends = onSchedule({ schedule: "every 15 minutes", timeoutSeconds: 300 }, async () => {
+exports.deliverDueSends = onSchedule({ schedule: "every 15 minutes", timeoutSeconds: 540, secrets: [SPOTIFY_CLIENT_SECRET] }, async () => {
   const due = await db
     .collection("sends")
     .where("status", "==", "scheduled")
@@ -829,7 +969,7 @@ async function hasDecemberSet(uid, pairId, now) {
 }
 
 // Each morning: "time for your pick" on the pair's draft day, and a nudge a week later and on the
-// 25th to anyone whose month's send hasn't gone.
+// 25th to anyone whose month's send hasn't gone. Also the Spotify sign-in reminders, below.
 exports.monthlyReminders = onSchedule(
   { schedule: "0 10 * * *", timeZone: monthly.TIME_ZONE, timeoutSeconds: 300 },
   async () => {
@@ -853,8 +993,84 @@ exports.monthlyReminders = onSchedule(
       }
     }
     if (count) logger.info("monthlyReminders", { sent: count });
+    await spotifyExpiryReminders(now);
   },
 );
+
+/**
+ * Spotify sign-ins run out six months after the first sign-in, whatever happens in between, so
+ * each person gets one reminder two weeks before and one on the day (SPEC.md, "First run").
+ * Runs inside the daily reminder job rather than as a job of its own.
+ */
+async function spotifyExpiryReminders(now) {
+  const nowMs = now.getTime();
+  const soon = Timestamp.fromMillis(nowMs + polish.REMIND_DAYS * polish.DAY);
+  const users = await db.collection("users").where("spotify.expiresAt", "<=", soon).get();
+  let count = 0;
+  for (const u of users.docs) {
+    const s = u.get("spotify") || {};
+    const expiresAtMs = s.expiresAt && s.expiresAt.toMillis ? s.expiresAt.toMillis() : NaN;
+    const kind = polish.expiryReminder(
+      { expiresAtMs, remindedSoonFor: s.remindedSoonFor, remindedExpiredFor: s.remindedExpiredFor },
+      nowMs,
+    );
+    if (!kind) continue;
+    await pushTo(u.id, polish.expiryText(kind, expiresAtMs, monthly.TIME_ZONE), { kind: "spotifyExpiry" });
+    const field = kind === "soon" ? "remindedSoonFor" : "remindedExpiredFor";
+    await u.ref.set({ spotify: { [field]: expiresAtMs } }, { merge: true });
+    count++;
+  }
+  if (count) logger.info("spotifyExpiryReminders", { sent: count });
+}
+
+// ---- Delete my data -------------------------------------------------------------------------
+//
+// Settings' "Delete my data" (SPEC.md, "Data model"): the person's own documents, their sends,
+// their pairs and invites, and their sign-in. Sends they received keep the sender's booklet, so the
+// other person's archive survives, minus everything that came from the deleted person. Playlists
+// already in their own Spotify are theirs and stay there. Album and artist caches hold nothing
+// personal and stay.
+exports.deleteMyData = onCall({ timeoutSeconds: 540, memory: "512MiB" }, async (request) => {
+  const uid = requireUid(request);
+  if (!request.data || request.data.confirm !== "DELETE") {
+    throw new HttpsError("invalid-argument", "Confirm the deletion first.");
+  }
+  const writer = db.bulkWriter();
+  let sendsDeleted = 0;
+  let sendsKept = 0;
+  for (const field of ["senderUid", "recipientUid"]) {
+    const snap = await db.collection("sends").where(field, "==", uid).get();
+    for (const doc of snap.docs) {
+      const plan = polish.deletionPlan(doc.data(), uid);
+      if (plan.action === "delete") {
+        writer.delete(doc.ref);
+        sendsDeleted++;
+      } else if (plan.action === "strip") {
+        const changes = { recipientDeleted: true, updatedAt: FieldValue.serverTimestamp() };
+        for (const f of plan.fields) changes[f] = FieldValue.delete();
+        writer.update(doc.ref, changes);
+        sendsKept++;
+      }
+    }
+  }
+  const invites = await db.collection("invites").where("inviterUid", "==", uid).get();
+  invites.docs.forEach((doc) => writer.delete(doc.ref));
+  const accepted = await db.collection("invites").where("acceptedBy", "==", uid).get();
+  accepted.docs.forEach((doc) => writer.update(doc.ref, { acceptedBy: FieldValue.delete() }));
+  const pairs = await db.collection("pairs").where("members", "array-contains", uid).get();
+  pairs.docs.forEach((doc) => writer.delete(doc.ref));
+  await writer.close();
+
+  // users/{uid} and everything under it: tokens, sets, settings, cached weekly charts.
+  await db.recursiveDelete(userDoc(uid));
+  try {
+    await getAuth().deleteUser(uid);
+  } catch (err) {
+    logger.warn("deleteUser", { message: err.message });
+  }
+  logger.info("deleteMyData", { sendsDeleted, sendsKept, pairs: pairs.size });
+  return { deleted: true, sendsDeleted, sendsKept, pairs: pairs.size };
+});
 
 // ---- Influence ------------------------------------------------------------------------------
 //

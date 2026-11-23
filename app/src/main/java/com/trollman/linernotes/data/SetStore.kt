@@ -53,6 +53,13 @@ class LocalSetStore(context: Context) : SetStore {
     override suspend fun saveWriting(writing: Writing) = withContext(Dispatchers.IO) {
         writingFile.writeText(storeJson.encodeToString(writing))
     }
+
+    /** Everything this store keeps on the phone, gone ("Delete my data"). */
+    suspend fun clear() = withContext(Dispatchers.IO) {
+        dir.deleteRecursively()
+        writingFile.delete()
+        Unit
+    }
 }
 
 /**

@@ -32,7 +32,7 @@ class PushService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         val n = message.notification ?: return
-        show(this, n.title ?: "A set has arrived", n.body ?: "", message.data["sendId"], message.data["pairId"])
+        show(this, n.title ?: "A set has arrived", n.body ?: "", message.data["sendId"], message.data["pairId"], message.data["kind"])
     }
 
     companion object {
@@ -40,6 +40,9 @@ class PushService : FirebaseMessagingService() {
         const val EXTRA_SEND_ID = "sendId"
         /** A monthly reminder carries the pair it's for. */
         const val EXTRA_PAIR_ID = "pairId"
+        /** What the notification is about; "spotifyExpiry" opens Setup. */
+        const val EXTRA_KIND = "kind"
+        const val KIND_SPOTIFY_EXPIRY = "spotifyExpiry"
 
         /** The one notification channel, made at start-up (LinerNotesApp). */
         fun createChannel(context: Context) {
@@ -49,7 +52,7 @@ class PushService : FirebaseMessagingService() {
             context.getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }
 
-        fun show(context: Context, title: String, body: String, sendId: String?, pairId: String? = null) {
+        fun show(context: Context, title: String, body: String, sendId: String?, pairId: String? = null, kind: String? = null) {
             if (Build.VERSION.SDK_INT >= 33 &&
                 ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
             ) return
@@ -58,10 +61,11 @@ class PushService : FirebaseMessagingService() {
                 .apply {
                     if (sendId != null) putExtra(EXTRA_SEND_ID, sendId)
                     if (pairId != null) putExtra(EXTRA_PAIR_ID, pairId)
+                    if (kind != null) putExtra(EXTRA_KIND, kind)
                 }
             val pending = PendingIntent.getActivity(
                 context,
-                (sendId ?: pairId ?: "inbox").hashCode(),
+                (sendId ?: pairId ?: kind ?: "inbox").hashCode(),
                 open,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )

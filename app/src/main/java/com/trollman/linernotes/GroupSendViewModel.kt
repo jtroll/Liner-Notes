@@ -811,6 +811,27 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Tries again to put a delivered send's albums in the recipient's Spotify. */
+    fun retryPlaylist(sendId: String) {
+        val cloud = graph.cloud ?: return
+        val key = "playlist:$sendId"
+        if (key in _state.value.busy) return
+        viewModelScope.launch {
+            busy(key, true)
+            runCatching { cloud.retryPlaylist(sendId) }
+                .onSuccess { r ->
+                    when {
+                        r == null -> Unit
+                        r.done -> say("It\u2019s in Spotify now.")
+                        r.notConnected -> say("Their Spotify isn\u2019t connected, so there\u2019s nowhere to put it yet.")
+                        else -> say(r.reason ?: "Spotify still said no.")
+                    }
+                }
+                .onFailure { e -> say("Couldn't try again: ${describeError(e)}") }
+            busy(key, false)
+        }
+    }
+
     /** Changes a pair's settings (monthlyOn, draftDay, decemberPause, nickname). */
     fun updatePair(pairId: String, changes: Map<String, Any>) {
         val cloud = graph.cloud ?: return

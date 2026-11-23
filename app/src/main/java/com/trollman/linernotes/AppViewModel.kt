@@ -16,10 +16,13 @@ import com.trollman.linernotes.data.Album
 import com.trollman.linernotes.data.DemoAlbums
 import com.trollman.linernotes.data.InviteInfo
 import com.trollman.linernotes.data.InviteLinks
+import com.trollman.linernotes.data.LocalSetStore
 import com.trollman.linernotes.data.Period
 import com.trollman.linernotes.data.Profile
 import com.trollman.linernotes.data.SpotifyAlbum
 import com.trollman.linernotes.spotify.PlayerState
+import com.trollman.linernotes.ui.system.Clicks
+import com.trollman.linernotes.update.UpdateState
 import com.trollman.linernotes.spotify.SpotifySignIn
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -64,8 +67,10 @@ data class UiState(
     val browsingDemo: Boolean = false,
     /** An invite link waiting for the person to say Join. */
     val invite: InvitePrompt? = null,
-    /** Somewhere the screens should go next: "inbox" or "send:<id>". */
+    /** Somewhere the screens should go next: "inbox", "settings", "send:<id>" or "pair:<id>". */
     val goTo: String? = null,
+    /** The click sound on hardware controls. */
+    val clicks: Boolean = false,
 )
 
 /** The "Join?" question for an opened invite link. [info] is null while it loads. */
@@ -78,6 +83,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = (app as LinerNotesApp).graph
     val setup: Setup = graph.setup
     val player: StateFlow<PlayerState> = graph.player.state
+    val updates: StateFlow<UpdateState> = graph.updates.state
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
@@ -89,6 +95,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     init {
         viewModelScope.launch {
             graph.prefs.shelfPeriod.collect { p -> _ui.update { it.copy(shelf = it.shelf.copy(period = p)) } }
+        }
+        // A quiet look for a newer build, for someone already signed in as a tester.
+        viewModelScope.launch {
+            graph.updates.quietCheck()?.let { say("Version ${it.version} is ready. Update it from Setup.") }
+        }
+        viewModelScope.launch {
+            graph.prefs.clicks.collect { on ->
+                Clicks.enabled = on
+                _ui.update { it.copy(clicks = on) }
+            }
         }
         val auth = graph.auth
         if (auth == null) {
@@ -178,6 +194,43 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { graph.prefs.setConnectionsSeen(false) }
     }
 
+    /**
+     * Settings' "Delete my data" (functions/index.js, "Delete my data"): the backend removes the
+     * person's documents, sends, pairs and sign-in, then this phone forgets them too.
+     */
+    fun deleteMyData() {
+        val cloud = graph.cloud ?: return say("There's nothing stored yet: this build has no backend.")
+        viewModelScope.launch {
+            busy("delete", true)
+            try {
+                cloud.deleteMyData()
+                LocalSetStore(getApplication()).clear()
+                graph.player.disconnect()
+                matches.clear()
+                graph.prefs.clearAll()
+                graph.auth?.signOut()
+                say("Your Liner Notes data is deleted.")
+            } catch (e: Exception) {
+                say("Couldn't delete everything: ${describe(e)}. Nothing on this phone was removed; try again.")
+            } finally {
+                busy("delete", false)
+            }
+        }
+    }
+
+    fun checkForUpdate() {
+        viewModelScope.launch { graph.updates.check() }
+    }
+
+    fun installUpdate() {
+        viewModelScope.launch { graph.updates.install() }
+    }
+
+    /** The click sound on the hardware controls (SPEC.md, "Hardware feel": off by default). */
+    fun setClicks(on: Boolean) {
+        viewModelScope.launch { graph.prefs.setClicks(on) }
+    }
+
     fun finishConnections() {
         viewModelScope.launch { graph.prefs.setConnectionsSeen(true) }
     }
@@ -257,6 +310,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** A tapped monthly reminder: straight to that pair. */
     fun openPair(pairId: String) = _ui.update { it.copy(goTo = "pair:$pairId") }
 
+    /** A tapped Spotify sign-in reminder: Settings, where Reconnect is. */
+    fun openSettings() = _ui.update { it.copy(goTo = "settings") }
+
     fun consumeGoTo() = _ui.update { it.copy(goTo = null) }
 
     // ---- Last.fm --------------------------------------------------------------------------------
@@ -309,8 +365,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val cloud = graph.cloud ?: return
                 viewModelScope.launch {
                     runCatching { cloud.connectSpotify(result.code, BuildConfig.SPOTIFY_REDIRECT_URI) }
-                        .onSuccess { name ->
-                            say("Spotify connected${if (name.isNotBlank()) " as $name" else ""}.")
+                        .onSuccess { (name, caughtUp) ->
+                            val also = when (caughtUp) {
+                                0 -> ""
+                                1 -> " One send you'd already had is now in your Spotify too."
+                                else -> " $caughtUp sends you'd already had are now in your Spotify too."
+                            }
+                            say("Spotify connected${if (name.isNotBlank()) " as $name" else ""}.$also")
                             // Connect playback straight away, so Play works first time.
                             graph.player.connect(activity)
                         }

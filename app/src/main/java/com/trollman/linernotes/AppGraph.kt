@@ -7,6 +7,7 @@ import com.trollman.linernotes.data.Prefs
 import com.trollman.linernotes.lastfm.LastFm
 import com.trollman.linernotes.spotify.AppRemotePlayer
 import com.trollman.linernotes.spotify.Player
+import com.trollman.linernotes.update.Updates
 
 /** The app's few long-lived objects. Small enough that a DI framework would be more than it saves. */
 class AppGraph(context: Context, val firebaseReady: Boolean) {
@@ -19,4 +20,5 @@ class AppGraph(context: Context, val firebaseReady: Boolean) {
         clientId = BuildConfig.SPOTIFY_CLIENT_ID,
         redirectUri = BuildConfig.SPOTIFY_REDIRECT_URI,
     )
+    val updates = Updates(firebaseReady)
 }

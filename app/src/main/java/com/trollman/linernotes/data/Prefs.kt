@@ -16,6 +16,14 @@ class Prefs(context: Context) {
     private val onboarded = booleanPreferencesKey("connections_seen")
     private val period = stringPreferencesKey("shelf_period")
     private val invite = stringPreferencesKey("pending_invite")
+    private val clickSound = booleanPreferencesKey("click_sound")
+
+    /** The click sound on hardware controls. Off by default (SPEC.md, "Hardware feel"). */
+    val clicks: Flow<Boolean> = store.data.map { it[clickSound] ?: false }
+    suspend fun setClicks(value: Boolean) = store.edit { it[clickSound] = value }
+
+    /** Forgets everything kept here ("Delete my data"). */
+    suspend fun clearAll() = store.edit { it.clear() }
 
     /** Whether the first-run connections screen has been finished or skipped. */
     val connectionsSeen: Flow<Boolean> = store.data.map { it[onboarded] ?: false }

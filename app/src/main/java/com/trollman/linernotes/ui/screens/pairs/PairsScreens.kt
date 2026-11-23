@@ -299,9 +299,10 @@ private fun HistoryRow(r: Received, pair: PairInfo, onClick: () -> Unit) {
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                listOf(
+                listOfNotNull(
                     if (r.mine) "TO ${pair.who.uppercase()}" else "FROM ${pair.who.uppercase()}",
                     whenText(r.deliveredAt).uppercase(),
+                    if (r.playlist?.failed == true) "NOT IN SPOTIFY · OPEN TO RETRY" else null,
                 ).joinToString(" · "),
                 style = mono(10.sp),
                 color = c.inkFaint,

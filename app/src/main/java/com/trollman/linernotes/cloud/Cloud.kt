@@ -14,6 +14,7 @@ import com.trollman.linernotes.data.Fit
 import com.trollman.linernotes.data.History
 import com.trollman.linernotes.data.Influence
 import com.trollman.linernotes.data.PairInfo
+import com.trollman.linernotes.data.PlaylistStatus
 import com.trollman.linernotes.data.Pick
 import com.trollman.linernotes.data.Reaction
 import com.trollman.linernotes.data.SetAlbum
@@ -181,8 +182,20 @@ class Cloud {
         call("lastfmConnect", mapOf("token" to token))["username"] as? String ?: ""
 
     /** Swaps Spotify's authorization code for tokens, kept server-side. Returns the display name. */
-    suspend fun connectSpotify(code: String, redirectUri: String): String =
-        call("spotifyConnect", mapOf("code" to code, "redirectUri" to redirectUri))["displayName"] as? String ?: ""
+    /** Connects (or reconnects) Spotify. Returns the Spotify name and how many earlier sends were caught up. */
+    suspend fun connectSpotify(code: String, redirectUri: String): Pair<String, Int> {
+        val r = call("spotifyConnect", mapOf("code" to code, "redirectUri" to redirectUri), timeoutSeconds = 190)
+        return (r["displayName"] as? String ?: "") to ((r["caughtUp"] as? Number)?.toInt() ?: 0)
+    }
+
+    /** Tries again to put a delivered send's albums in the recipient's Spotify. */
+    suspend fun retryPlaylist(sendId: String): PlaylistStatus? =
+        PlaylistStatus.parse(call("retryPlaylist", mapOf("sendId" to sendId), timeoutSeconds = 190))
+
+    /** Settings' "Delete my data": everything of the signed-in person's, and their sign-in. */
+    suspend fun deleteMyData() {
+        call("deleteMyData", mapOf("confirm" to "DELETE"), timeoutSeconds = 550)
+    }
 
     /** Finds the Spotify release for an album from Last.fm, or null when nothing matches well. */
     suspend fun findSpotifyAlbum(artist: String, title: String): SpotifyAlbum? {
@@ -222,7 +235,7 @@ class Cloud {
 
     /** Joins: forms the pair and receives anything already due. Returns (inviter's name, sets delivered). */
     suspend fun acceptInvite(token: String, name: String): Pair<String, Int> {
-        val r = call("acceptInvite", mapOf("token" to token, "name" to name))
+        val r = call("acceptInvite", mapOf("token" to token, "name" to name), timeoutSeconds = 190)
         return (r["inviterName"] as? String ?: "") to ((r["delivered"] as? Number)?.toInt() ?: 0)
     }
 
@@ -248,6 +261,7 @@ class Cloud {
                 "inviteToken" to inviteToken, "fromName" to fromName, "test" to test,
                 "pairId" to pairId, "kind" to kind, "month" to month,
             ),
+            timeoutSeconds = 190, // delivering now also fills the recipient's Spotify
         )
         return Scheduled(
             status = r["status"] as? String ?: "scheduled",
@@ -282,6 +296,7 @@ class Cloud {
                         set = d.getString("booklet")?.let { booklet(it) },
                         reactions = reactions(d.get("reactions")),
                         influence = Influence.parse(d.get("influence")),
+                        playlist = PlaylistStatus.parse(d.get("playlist")),
                     )
                 }
             )
@@ -311,6 +326,7 @@ class Cloud {
                             kind = d.getString("kind") ?: "group",
                             reactions = reactions(d.get("reactions")),
                             influence = Influence.parse(d.get("influence")),
+                            playlist = PlaylistStatus.parse(d.get("playlist")),
                         )
                     }.sortedByDescending { it.deliveredAt }
                 )
@@ -438,6 +454,8 @@ class Cloud {
                     lastfmUsername = snap.getString("lastfm.username"),
                     spotifyName = snap.getString("spotify.displayName"),
                     spotifyConnectedAt = snap.getTimestamp("spotify.connectedAt")?.toDate()?.time,
+                    spotifyExpiresAt = snap.getTimestamp("spotify.expiresAt")?.toDate()?.time,
+                    spotifyExpired = snap.getBoolean("spotify.expired") == true,
                 )
             )
         }

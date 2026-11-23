@@ -33,7 +33,23 @@ data class Profile(
     val lastfmUsername: String? = null,
     val spotifyName: String? = null,
     val spotifyConnectedAt: Long? = null,
-)
+    /** When the Spotify sign-in runs out: six months after the first sign-in, whatever happens. */
+    val spotifyExpiresAt: Long? = null,
+    /** Spotify has already refused the sign-in. */
+    val spotifyExpired: Boolean = false,
+) {
+    /** Whole days until the Spotify sign-in runs out; 0 or less once it has. */
+    fun spotifyDaysLeft(now: Long): Int? =
+        spotifyExpiresAt?.let { Math.floorDiv(it - now, 86_400_000L).toInt() }
+
+    /** The sign-in has run out (or Spotify said so): Reconnect is the only way on. */
+    fun spotifyRunOut(now: Long): Boolean =
+        spotifyName != null && (spotifyExpired || (spotifyExpiresAt != null && spotifyExpiresAt <= now))
+
+    /** Two weeks or less to go: time for the reminder (SPEC.md, "First run"). */
+    fun spotifyRunningOut(now: Long): Boolean =
+        spotifyName != null && !spotifyRunOut(now) && (spotifyDaysLeft(now) ?: Int.MAX_VALUE) < 14
+}
 
 /** Last.fm's listening windows. */
 enum class Period(val apiValue: String, val label: String, val longLabel: String) {

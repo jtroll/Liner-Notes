@@ -269,6 +269,7 @@ fun RecordKey(
                 awaitEachGesture {
                     awaitFirstDown().consume()
                     view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                    Clicks.press()
                     if (isListening) {
                         // Tapped while recording in tap mode: stop.
                         stop()
@@ -284,6 +285,7 @@ fun RecordKey(
                     // A long press is hold-to-talk; a quick tap leaves it recording until the next tap.
                     if (System.currentTimeMillis() - downAt >= HOLD_MILLIS) {
                         view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                        Clicks.release()
                         stop()
                     }
                 }

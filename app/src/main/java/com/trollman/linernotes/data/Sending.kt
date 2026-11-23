@@ -30,12 +30,44 @@ data class SendInfo(
     val reactions: Map<Int, Reaction> = emptyMap(),
     /** What it did to the recipient's listening, when both turned sharing on. */
     val influence: Influence = Influence(),
+    /** How adding its albums to the recipient's Spotify went, once delivered. */
+    val playlist: PlaylistStatus? = null,
 ) {
     val delivered: Boolean get() = status == "delivered"
 
     /** This send as the recipient sees it, for the sender to look back at. */
     fun asReceived(): Received? = set?.let {
-        Received(id, fromName, deliveredAt ?: deliverAt, it, test, pairId, kind, reactions, mine = true, influence = influence)
+        Received(id, fromName, deliveredAt ?: deliverAt, it, test, pairId, kind, reactions, mine = true, influence = influence, playlist = playlist)
+    }
+}
+
+/**
+ * How a delivered send's albums got into the recipient's Spotify (functions/index.js,
+ * "Playlists in the recipient's Spotify"): a month's pick joins their running "From …" playlist,
+ * a group send gets its own. [state] is "done", "failed" or "notConnected".
+ */
+@Immutable
+data class PlaylistStatus(
+    val state: String,
+    val url: String? = null,
+    val missing: List<String> = emptyList(),
+    val reason: String? = null,
+) {
+    val done: Boolean get() = state == "done"
+    val failed: Boolean get() = state == "failed"
+    val notConnected: Boolean get() = state == "notConnected"
+
+    companion object {
+        fun parse(raw: Any?): PlaylistStatus? {
+            val m = raw as? Map<*, *> ?: return null
+            val state = m["state"] as? String ?: return null
+            return PlaylistStatus(
+                state = state,
+                url = (m["url"] as? String)?.takeIf { it.startsWith("https://") },
+                missing = (m["missing"] as? List<*>).orEmpty().filterIsInstance<String>(),
+                reason = m["reason"] as? String,
+            )
+        }
     }
 }
 
@@ -69,6 +101,7 @@ data class Received(
     /** True when it's one of the signed-in person's own sends, seen as the recipient sees it. */
     val mine: Boolean = false,
     val influence: Influence = Influence(),
+    val playlist: PlaylistStatus? = null,
 ) {
     val isMonthly: Boolean get() = kind == "monthly"
 }

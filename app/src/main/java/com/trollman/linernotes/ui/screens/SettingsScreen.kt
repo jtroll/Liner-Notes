@@ -17,10 +17,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -33,6 +41,7 @@ import com.trollman.linernotes.UiState
 import com.trollman.linernotes.spotify.Connection
 import com.trollman.linernotes.spotify.PlayerState
 import com.trollman.linernotes.ui.system.DotMatrixText
+import com.trollman.linernotes.ui.system.HardwareSwitch
 import com.trollman.linernotes.ui.system.Led
 import com.trollman.linernotes.ui.system.Panel
 import com.trollman.linernotes.ui.system.PhysicalButton
@@ -41,6 +50,7 @@ import com.trollman.linernotes.ui.system.SectionLabel
 import com.trollman.linernotes.ui.system.findActivity
 import com.trollman.linernotes.ui.theme.liner
 import com.trollman.linernotes.ui.theme.mono
+import com.trollman.linernotes.update.UpdateState
 
 @Composable
 fun SettingsScreen(
@@ -53,6 +63,7 @@ fun SettingsScreen(
 ) {
     val c = liner
     val context = LocalContext.current
+    val updates by vm.updates.collectAsState()
     Column(
         Modifier
             .fillMaxSize()
@@ -70,6 +81,10 @@ fun SettingsScreen(
         Spacer(Modifier.height(20.dp))
 
         if (ui.account != null) {
+            SpotifyExpiryNotice(ui.profile, busy = "spotify" in ui.busy, onReconnect = onConnectSpotify)
+            if (ui.profile.spotifyRunOut(System.currentTimeMillis()) || ui.profile.spotifyRunningOut(System.currentTimeMillis())) {
+                Spacer(Modifier.height(16.dp))
+            }
             SectionLabel("Connections")
             ConnectionSwitches(ui, setup, vm::connectLastFm, onConnectSpotify)
             Spacer(Modifier.height(16.dp))
@@ -135,6 +150,25 @@ fun SettingsScreen(
             Spacer(Modifier.height(16.dp))
         }
 
+        SectionLabel("Sound")
+        Panel {
+            HardwareSwitch(
+                checked = ui.clicks,
+                onToggle = vm::setClicks,
+                label = "Click sound",
+                description = "A soft click when you press a button, as well as the buzz. Follows the phone's volume.",
+            )
+        }
+        Spacer(Modifier.height(16.dp))
+
+        UpdatesPanel(updates, vm::checkForUpdate, vm::installUpdate, enabled = BuildConfig.HAS_FIREBASE_CONFIG)
+        Spacer(Modifier.height(16.dp))
+
+        if (ui.account != null) {
+            DeleteMyData(busy = "delete" in ui.busy, onDelete = vm::deleteMyData)
+            Spacer(Modifier.height(16.dp))
+        }
+
         SectionLabel("This build")
         Panel {
             Text(
@@ -161,5 +195,90 @@ fun SettingsScreen(
             color = c.inkFaint,
         )
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+/** Setup > Updates: the newest build from App Distribution, installed from here. */
+@Composable
+private fun UpdatesPanel(state: UpdateState, onCheck: () -> Unit, onInstall: () -> Unit, enabled: Boolean) {
+    val c = liner
+    SectionLabel("Updates")
+    Panel {
+        val available = state.available
+        Text(
+            when {
+                available != null -> "Version ${available.version} is ready. You have ${BuildConfig.VERSION_NAME}."
+                state.upToDate -> "You have the newest build, ${BuildConfig.VERSION_NAME}."
+                else -> "New builds arrive in App Tester. You can also check and install them here."
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = c.ink,
+            modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
+        )
+        available?.notes?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = c.inkSoft, maxLines = 6)
+        }
+        state.problem?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = c.inkSoft)
+        }
+        Spacer(Modifier.height(10.dp))
+        if (state.downloading) {
+            val p = state.progress
+            if (p != null) LinearProgressIndicator(progress = { p }, Modifier.fillMaxWidth(), color = c.signal, trackColor = c.well)
+            else LinearProgressIndicator(Modifier.fillMaxWidth(), color = c.signal, trackColor = c.well)
+            Spacer(Modifier.height(6.dp))
+            Text("DOWNLOADING", style = mono(11.sp), color = c.inkFaint)
+        } else if (available != null) {
+            PhysicalTextButton("Update to ${available.version}", onInstall, Modifier.fillMaxWidth(), accent = true)
+        } else {
+            PhysicalTextButton(
+                if (state.checking) "Checking…" else "Check for an update",
+                onCheck,
+                Modifier.fillMaxWidth(),
+                enabled = enabled && !state.checking,
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+    }
+}
+
+/**
+ * Setup > Delete my data (SPEC.md, "Data model"). Asks once more, in plain words, before anything
+ * goes: what's deleted, what the other person keeps, and that it can't be undone.
+ */
+@Composable
+private fun DeleteMyData(busy: Boolean, onDelete: () -> Unit) {
+    val c = liner
+    var asking by remember { mutableStateOf(false) }
+    SectionLabel("Your data")
+    Panel {
+        Text(
+            "Delete everything Liner Notes keeps about you: your sets, notes and writing, your sends, " +
+                "your pairs, your Last.fm and Spotify connections, and your sign-in.",
+            style = MaterialTheme.typography.bodySmall,
+            color = c.inkSoft,
+            modifier = Modifier.padding(top = 12.dp, bottom = 10.dp),
+        )
+        PhysicalTextButton(if (busy) "Deleting…" else "Delete my data", { asking = true }, Modifier.fillMaxWidth(), enabled = !busy)
+        Spacer(Modifier.height(12.dp))
+    }
+    if (asking) {
+        AlertDialog(
+            onDismissRequest = { asking = false },
+            title = { Text("Delete your data?") },
+            text = {
+                Text(
+                    "Your sets, notes, sends, pairs and connections are deleted, and you're signed out. " +
+                        "Sets you were sent stay in the sender's archive, without your reactions. " +
+                        "Playlists already in your Spotify stay there. This can't be undone.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { asking = false; onDelete() }) { Text("Delete everything") }
+            },
+            dismissButton = {
+                TextButton(onClick = { asking = false }) { Text("Keep it") }
+            },
+        )
     }
 }

@@ -72,6 +72,7 @@ fun ShelfScreen(
     onInbox: () -> Unit,
     inboxCount: Int,
     onPairs: () -> Unit,
+    onReconnectSpotify: () -> Unit = {},
 ) {
     val c = liner
     val shelf = ui.shelf
@@ -127,6 +128,10 @@ fun ShelfScreen(
                         ) { Icon(Icons.Rounded.Tune, contentDescription = null) }
                     }
                     Spacer(Modifier.height(14.dp))
+                    SpotifyExpiryNotice(ui.profile, busy = "spotify" in ui.busy, onReconnect = onReconnectSpotify)
+                    if (ui.profile.spotifyRunOut(System.currentTimeMillis()) || ui.profile.spotifyRunningOut(System.currentTimeMillis())) {
+                        Spacer(Modifier.height(14.dp))
+                    }
                     DisplayWindow {
                         Text(
                             if (shelf.demo) "SAMPLE SHELF" else "TOP ALBUMS · ${shelf.owner.orEmpty().uppercase()}",

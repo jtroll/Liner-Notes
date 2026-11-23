@@ -77,7 +77,10 @@ fun PhysicalButton(
     val lift by animateDpAsState(if (pressed) 0.5.dp else if (latched) 1.5.dp else 5.dp, Motion.press(), label = "lift")
     val view = LocalView.current
     LaunchedEffect(pressed) {
-        if (pressed) view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        if (pressed) {
+            view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            Clicks.press()
+        }
     }
     val face = when {
         accent -> c.signal
@@ -168,6 +171,7 @@ fun HardwareSwitch(
                 role = Role.Switch,
                 onValueChange = {
                     view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                    Clicks.release()
                     onToggle(it)
                 },
             )

@@ -197,6 +197,7 @@ fun ReceivedScreen(
     onReact: (index: Int, reaction: String?, comment: String) -> Unit = { _, _, _ -> },
     busy: Set<String> = emptySet(),
     backLabel: String = "Back to your inbox",
+    onRetryPlaylist: () -> Unit = {},
 ) {
     val c = liner
     val set = received.set
@@ -236,6 +237,11 @@ fun ReceivedScreen(
                 }
             }
             item { Letter(set, received.fromName) }
+            item {
+                Box(Modifier.padding(horizontal = 18.dp)) {
+                    PlaylistNote(received, onOpenLink, onRetryPlaylist, retrying = "playlist:${received.id}" in busy)
+                }
+            }
             influenceLine(received, 0)?.let { line ->
                 item { Box(Modifier.padding(horizontal = 18.dp)) { InfluenceNote(line) } }
             }
@@ -249,11 +255,9 @@ fun ReceivedScreen(
             return@LazyColumn
         }
         item { Booklet(set) }
-        set.playlistUrl?.let { url ->
-            item {
-                Box(Modifier.padding(horizontal = 18.dp)) {
-                    PhysicalTextButton("Open the playlist in Spotify", { onOpenLink(url) }, Modifier.fillMaxWidth(), accent = true)
-                }
+        item {
+            Box(Modifier.padding(horizontal = 18.dp)) {
+                PlaylistNote(received, onOpenLink, onRetryPlaylist, retrying = "playlist:${received.id}" in busy)
             }
         }
         received.influence.current?.let { look ->
@@ -437,5 +441,59 @@ private fun ReactionPanel(
             enabled = !busy && comment.isNotBlank() && comment != current?.comment,
         )
         Spacer(Modifier.height(12.dp))
+    }
+}
+
+/**
+ * Where a send's albums are in Spotify (functions/index.js, "Playlists in the recipient's
+ * Spotify"): for the recipient, their own playlist, or how to get one; for the sender, whether it
+ * reached the other person's Spotify, with Retry when it didn't. A group send made before any of
+ * this falls back to the sender's own playlist link.
+ */
+@Composable
+private fun PlaylistNote(received: Received, onOpenLink: (String) -> Unit, onRetry: () -> Unit, retrying: Boolean) {
+    val c = liner
+    val p = received.playlist
+    val senderUrl = received.set.playlistUrl
+    val them = received.set.forName.ifBlank { "them" }
+    val from = received.fromName.ifBlank { "them" }
+    if (received.test) {
+        senderUrl?.let { PhysicalTextButton("Open the playlist in Spotify", { onOpenLink(it) }, Modifier.fillMaxWidth()) }
+        return
+    }
+    Column {
+        val line: String? = when {
+            p == null -> null
+            received.mine && p.done -> if (received.isMonthly) "Added to the \u201cFrom\u201d playlist in $them\u2019s Spotify." else "It\u2019s a playlist in $them\u2019s Spotify too."
+            received.mine && p.notConnected -> "$them hasn\u2019t connected Spotify, so it\u2019s only in Liner Notes for now. It goes in their Spotify when they do."
+            received.mine && p.failed -> "Couldn\u2019t add it to $them\u2019s Spotify. ${p.reason.orEmpty()}"
+            p.done -> if (received.isMonthly) "Added to your \u201cFrom $from\u201d playlist in Spotify." else "It\u2019s in your Spotify as a playlist, in the booklet\u2019s order."
+            p.notConnected -> "Connect Spotify in Setup and sends from $from land in a playlist in your account too."
+            p.failed -> "Couldn\u2019t add it to your Spotify. ${p.reason.orEmpty()}"
+            else -> null
+        }
+        line?.let {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Led(on = p?.done == true)
+                Spacer(Modifier.width(10.dp))
+                Text(it.trim(), style = MaterialTheme.typography.bodySmall, color = c.inkSoft)
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+        if (p != null && p.missing.isNotEmpty()) {
+            Text(
+                "Not on Spotify: ${p.missing.joinToString(", ")}.",
+                style = MaterialTheme.typography.bodySmall,
+                color = c.inkFaint,
+            )
+            Spacer(Modifier.height(10.dp))
+        }
+        when {
+            p?.failed == true -> PhysicalTextButton(if (retrying) "Trying again…" else "Retry", onRetry, Modifier.fillMaxWidth(), enabled = !retrying)
+            p?.done == true && p.url != null && !received.mine ->
+                PhysicalTextButton("Open the playlist in Spotify", { onOpenLink(p.url) }, Modifier.fillMaxWidth(), accent = !received.isMonthly)
+            !received.isMonthly && senderUrl != null ->
+                PhysicalTextButton(if (received.mine) "Open your playlist" else "Open the playlist in Spotify", { onOpenLink(senderUrl) }, Modifier.fillMaxWidth())
+        }
     }
 }

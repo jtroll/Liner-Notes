@@ -185,13 +185,20 @@ fun ConnectionSwitches(
             },
         )
         HorizontalDivider(color = liner.bevelDark.copy(alpha = 0.4f))
+        val now = System.currentTimeMillis()
+        val runOut = ui.profile.spotifyRunOut(now)
+        val daysLeft = ui.profile.spotifyDaysLeft(now)
         HardwareSwitch(
-            checked = spotify != null,
-            onToggle = { if (spotify == null) onConnectSpotify() },
+            checked = spotify != null && !runOut,
+            onToggle = { if (spotify == null || runOut) onConnectSpotify() },
             enabled = setup.canConnectSpotify || spotify != null,
             label = "Spotify",
             description = "Plays albums right here, and makes playlists.",
             status = when {
+                "spotify" in ui.busy && spotify != null -> "Reconnecting…"
+                runOut -> "Sign-in ran out · tap to reconnect"
+                spotify != null && ui.profile.spotifyRunningOut(now) && daysLeft != null ->
+                    "Connected as $spotify · sign-in runs out in ${daysLeft.coerceAtLeast(0)} days"
                 spotify != null -> "Connected as $spotify"
                 "spotify" in ui.busy -> "Connecting…"
                 !setup.canConnectSpotify -> "Not set up in this build"

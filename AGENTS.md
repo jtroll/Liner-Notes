@@ -55,6 +55,23 @@ stays out of this repository while the repository is public.
   `monthlyReminders` runs each morning (Pacific) for the draft day, a week later and the 25th.
 - The printable booklet is drawn on the phone (`print/BookletPdf.kt`): half-letter pages, or two
   to a letter sheet in fold order (`print/Imposition.kt`).
+- Dictation (`ui/system/Dictation.kt`, `formatDictation` in `functions/lib/notes.js`): Android's
+  speech recognition, then Claude tidies the transcript in the sender's words and lists its fixes.
+  Raw transcripts stay with the sender (`GroupSet.forRecipient()` strips them).
+- Already given (`data/History.kt`): earlier lists pasted in Your writing plus the sender's own
+  sends to the same person mark albums on the shortlist and keep them out of monthly suggestions.
+- Influence (`functions/index.js`, "Influence"; pure parts in `functions/lib/influence.js`): only
+  when both members of a pair turn sharing on. `measureInfluence` (daily) and `influenceNow` read
+  the recipient's Last.fm weekly charts, cache them in `users/{uid}/weeks`, and write only per-album
+  summaries to the send.
+- Phase 6 (`functions/lib/polish.js`): on delivery, `toRecipientSpotify` puts the albums in the
+  recipient's Spotify if they connected it (a month's pick joins a running "From …" playlist whose
+  id lives in their private tokens doc; a group send gets its own) and records `playlist` on the
+  send; `retryPlaylist` retries; `spotifyConnect` catches up missed sends. Spotify sign-in
+  reminders ride on the daily `monthlyReminders` job (Cloud Scheduler's free tier is three jobs,
+  and there are three). `deleteMyData` removes the person's documents, sends, pairs, invites and
+  Auth user; sends they received keep the sender's booklet. In-app updates use the App
+  Distribution SDK (`update/Updates.kt`); the click sound is synthesised (`ui/system/Clicks.kt`).
 
 ## Design system
 

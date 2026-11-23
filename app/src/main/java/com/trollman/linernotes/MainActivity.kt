@@ -57,6 +57,10 @@ class MainActivity : ComponentActivity() {
             vm.openPair(id)
             intent.removeExtra(PushService.EXTRA_PAIR_ID)
         }
+        if (intent.getStringExtra(PushService.EXTRA_KIND) == PushService.KIND_SPOTIFY_EXPIRY) {
+            vm.openSettings()
+            intent.removeExtra(PushService.EXTRA_KIND)
+        }
         val data = intent.data ?: return
         if (data.scheme != "linernotes") return
         when (data.host) {

@@ -163,6 +163,11 @@ dependencies {
     implementation("com.google.firebase:firebase-functions")
     // Push: "a set has arrived" on the recipient's phone.
     implementation("com.google.firebase:firebase-messaging")
+    // In-app updates from App Distribution (Setup > Updates). The API everywhere; the part that
+    // actually downloads and installs only in debug builds, which are the ones App Tester serves.
+    // Beta artifacts, pinned on purpose.
+    implementation("com.google.firebase:firebase-appdistribution-api:16.0.0-beta17")
+    debugImplementation("com.google.firebase:firebase-appdistribution:16.0.0-beta17")
 
     // ---- Google sign-in via Credential Manager (as Kerasma) ----
     implementation("androidx.credentials:credentials:1.3.0")

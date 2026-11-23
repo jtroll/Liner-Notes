@@ -135,6 +135,7 @@ fun AppRoot(vm: AppViewModel, onConnectSpotify: () -> Unit) {
         place = when {
             target.startsWith("send:") -> Place.Received(target.removePrefix("send:"))
             target.startsWith("pair:") -> Place.Pair(target.removePrefix("pair:"))
+            target == "settings" -> Place.Settings
             else -> Place.Inbox
         }
         vm.consumeGoTo()
@@ -167,6 +168,7 @@ fun AppRoot(vm: AppViewModel, onConnectSpotify: () -> Unit) {
                                 onInbox = { place = Place.Inbox },
                                 inboxCount = groupState.inbox.size,
                                 onPairs = { place = Place.Pairs },
+                                onReconnectSpotify = onConnectSpotify,
                             )
                             is Place.AlbumOpen -> AlbumScreen(
                                 album = p.album,
@@ -258,6 +260,7 @@ fun AppRoot(vm: AppViewModel, onConnectSpotify: () -> Unit) {
                                         onReact = { i, r, comment -> group.react(received.id, i, r, comment) },
                                         busy = groupState.busy,
                                         backLabel = if (p.pairId != null) "Back to the pair" else "Back to your inbox",
+                                        onRetryPlaylist = { group.retryPlaylist(received.id) },
                                     )
                                 }
                             }
