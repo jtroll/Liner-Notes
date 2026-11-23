@@ -40,7 +40,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.trollman.linernotes.GroupState
+import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.Color
+import com.trollman.linernotes.data.GroupSet
+import com.trollman.linernotes.data.Reaction
 import com.trollman.linernotes.data.Received
+import com.trollman.linernotes.data.reactionLabel
+import com.trollman.linernotes.ui.system.PhysicalButton
+import com.trollman.linernotes.ui.system.VinylSleeve
 import com.trollman.linernotes.data.SetAlbum
 import com.trollman.linernotes.ui.screens.group.BackHeader
 import com.trollman.linernotes.ui.screens.group.Booklet
@@ -118,7 +125,13 @@ private fun InboxRow(r: Received, onClick: () -> Unit) {
             Spacer(Modifier.width(14.dp))
         }
         Column(Modifier.weight(1f)) {
-            Text(r.set.title, style = MaterialTheme.typography.titleSmall, color = c.ink, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(
+                if (r.isMonthly && first != null) first.album.heading else r.set.title,
+                style = MaterialTheme.typography.titleSmall,
+                color = c.ink,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
             Text(
                 listOfNotNull(
                     r.fromName.ifBlank { null }?.let { "FROM ${it.uppercase()}" },
@@ -128,7 +141,11 @@ private fun InboxRow(r: Received, onClick: () -> Unit) {
                 style = mono(10.sp),
                 color = if (r.test) c.signal else c.inkFaint,
             )
-            Text("${r.set.entries.size} albums", style = MaterialTheme.typography.bodySmall, color = c.inkSoft)
+            Text(
+                if (r.isMonthly) "${r.set.title}, with a note" else "${r.set.entries.size} albums",
+                style = MaterialTheme.typography.bodySmall,
+                color = c.inkSoft,
+            )
         }
     }
 }
@@ -165,7 +182,9 @@ private fun JoinPanel(joining: Boolean, onJoin: (String) -> Unit) {
 
 /**
  * A set someone sent you: the booklet, each album to play or open in Spotify, the playlist, and
- * the printable PDF (SPEC.md, "Group send: a booklet view").
+ * the printable PDF (SPEC.md, "Group send: a booklet view"). A monthly send reads as a short
+ * letter with its record. Each album takes a reaction (SPEC.md, "Reactions"). With [Received.mine]
+ * it's one of your own sends as they see it, with their reactions.
  */
 @Composable
 fun ReceivedScreen(
@@ -174,10 +193,14 @@ fun ReceivedScreen(
     onPlay: (SetAlbum) -> Unit,
     onOpenInSpotify: (SetAlbum) -> Unit,
     onOpenLink: (String) -> Unit,
+    onReact: (index: Int, reaction: String?, comment: String) -> Unit = { _, _, _ -> },
+    busy: Set<String> = emptySet(),
+    backLabel: String = "Back to your inbox",
 ) {
     val c = liner
     val set = received.set
     val insets = WindowInsets.safeDrawing.asPaddingValues()
+    val canReact = !received.mine
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
@@ -189,11 +212,37 @@ fun ReceivedScreen(
         item {
             Box(Modifier.padding(horizontal = 18.dp)) {
                 BackHeader(
-                    if (received.fromName.isBlank()) "Inbox" else "From ${received.fromName}",
+                    when {
+                        received.mine -> if (set.forName.isBlank()) "Sent" else "To ${set.forName}"
+                        received.fromName.isBlank() -> "Inbox"
+                        else -> "From ${received.fromName}"
+                    },
                     onBack,
-                    backDescription = "Back to your inbox",
+                    backDescription = backLabel,
                 )
             }
+        }
+        if (received.isMonthly && set.entries.isNotEmpty()) {
+            val e = set.entries.first()
+            item {
+                Column(Modifier.padding(horizontal = 18.dp)) {
+                    VinylSleeve(e.album.toAlbum(), out = 0.55f, spinning = false)
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        PhysicalTextButton("Play", { onPlay(e.album) }, Modifier.weight(1f), accent = true)
+                        PhysicalTextButton("Open in Spotify", { onOpenInSpotify(e.album) }, Modifier.weight(1f))
+                    }
+                }
+            }
+            item { Letter(set, received.fromName) }
+            item {
+                Box(Modifier.padding(horizontal = 18.dp)) {
+                    ReactionPanel(e.album.title, received.reactions[0], canReact, "react:${received.id}:0" in busy, received.fromName) { r, comment ->
+                        onReact(0, r, comment)
+                    }
+                }
+            }
+            return@LazyColumn
         }
         item { Booklet(set) }
         set.playlistUrl?.let { url ->
@@ -205,22 +254,147 @@ fun ReceivedScreen(
         }
         item { Box(Modifier.padding(horizontal = 18.dp)) { SectionLabel("The albums") } }
         itemsIndexed(set.entries, key = { _, e -> e.key }) { i, e ->
-            Row(Modifier.padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text((i + 1).toString().padStart(2, '0'), style = mono(14.sp), color = c.signal, modifier = Modifier.width(28.dp))
-                CoverArt(e.album.toAlbum(), Modifier.size(48.dp).clip(RoundedCornerShape(3.dp)), showTitleOnDrawn = false)
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(e.album.title, style = MaterialTheme.typography.titleSmall, color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(e.album.artist, style = MaterialTheme.typography.bodySmall, color = c.inkSoft, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Column(Modifier.padding(horizontal = 18.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text((i + 1).toString().padStart(2, '0'), style = mono(14.sp), color = c.signal, modifier = Modifier.width(28.dp))
+                    CoverArt(e.album.toAlbum(), Modifier.size(48.dp).clip(RoundedCornerShape(3.dp)), showTitleOnDrawn = false)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(e.album.title, style = MaterialTheme.typography.titleSmall, color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(e.album.artist, style = MaterialTheme.typography.bodySmall, color = c.inkSoft, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        IconKey(Icons.Rounded.PlayArrow, "Play ${e.album.title}", onClick = { onPlay(e.album) })
+                        IconKey(Icons.AutoMirrored.Rounded.OpenInNew, "Open ${e.album.title} in Spotify", onClick = { onOpenInSpotify(e.album) })
+                    }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    IconKey(Icons.Rounded.PlayArrow, "Play ${e.album.title}", onClick = { onPlay(e.album) })
-                    IconKey(Icons.AutoMirrored.Rounded.OpenInNew, "Open ${e.album.title} in Spotify", onClick = { onOpenInSpotify(e.album) })
-                }
+                ReactionKeys(e.album.title, received.reactions[i], canReact, "react:${received.id}:$i" in busy) { r -> onReact(i, r, received.reactions[i]?.comment ?: "") }
             }
         }
         item {
             Box(Modifier.padding(horizontal = 18.dp)) { PdfPanel(set, received.fromName) }
         }
+    }
+}
+
+/** A monthly send as the recipient reads it: a short letter on paper. */
+@Composable
+fun Letter(set: GroupSet, fromName: String) {
+    val e = set.entries.firstOrNull() ?: return
+    Box(Modifier.padding(horizontal = 18.dp)) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color(0xFFF7F3EA))
+                .padding(22.dp)
+        ) {
+            Text(set.title.uppercase(), style = mono(10.sp), color = Color(0xFF6B655A))
+            Spacer(Modifier.height(10.dp))
+            Text(e.album.heading, style = MaterialTheme.typography.titleMedium, color = Color(0xFF1E1B16))
+            Spacer(Modifier.height(10.dp))
+            Text(e.note, style = MaterialTheme.typography.bodyMedium, color = Color(0xFF1E1B16))
+            if (e.favoriteTracks.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text("Favorite Tracks:", style = MaterialTheme.typography.labelMedium, color = Color(0xFF6B655A))
+                Text(e.favoriteTracks.joinToString(", ") { "\u201c$it\u201d" }, style = MaterialTheme.typography.bodySmall, color = Color(0xFF3A362F))
+            }
+            if (fromName.isNotBlank()) {
+                Spacer(Modifier.height(14.dp))
+                Text("\u2014 $fromName", style = MaterialTheme.typography.bodyMedium, color = Color(0xFF1E1B16))
+            }
+        }
+    }
+}
+
+private val reactionChoices = listOf("loved", "liked", "notForMe")
+
+/** Loved, liked, not for me: three small latching keys under an album. */
+@Composable
+private fun ReactionKeys(title: String, current: Reaction?, canReact: Boolean, busy: Boolean, onPick: (String?) -> Unit) {
+    val c = liner
+    if (!canReact) {
+        if (current != null && current.label.isNotBlank()) {
+            Text(
+                current.label.uppercase() + if (current.comment.isNotBlank()) " · \u201c${current.comment}\u201d" else "",
+                style = mono(10.sp),
+                color = c.signal,
+                modifier = Modifier.padding(start = 28.dp, top = 6.dp),
+            )
+        }
+        return
+    }
+    Row(Modifier.padding(start = 28.dp, top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        reactionChoices.forEach { r ->
+            val on = current?.reaction == r
+            PhysicalButton(
+                { onPick(if (on) null else r) },
+                Modifier.height(34.dp),
+                latched = on,
+                enabled = !busy,
+                shape = RoundedCornerShape(10.dp),
+                contentDescription = "${reactionLabel(r)}: $title",
+            ) { Text(reactionLabel(r).uppercase(), style = mono(10.sp), modifier = Modifier.padding(horizontal = 10.dp)) }
+        }
+    }
+}
+
+/** The reaction and an optional comment back to the sender, for a monthly send. */
+@Composable
+private fun ReactionPanel(
+    title: String,
+    current: Reaction?,
+    canReact: Boolean,
+    busy: Boolean,
+    fromName: String,
+    onSave: (String?, String) -> Unit,
+) {
+    val c = liner
+    var comment by rememberSaveable(current?.comment) { mutableStateOf(current?.comment ?: "") }
+    Panel {
+        Spacer(Modifier.height(8.dp))
+        SectionLabel(if (canReact) "How did it land?" else "How it landed")
+        if (!canReact) {
+            Text(
+                current?.label?.ifBlank { null } ?: "No reaction yet.",
+                style = MaterialTheme.typography.titleSmall,
+                color = if (current?.label.isNullOrBlank()) c.inkSoft else c.signal,
+            )
+            if (!current?.comment.isNullOrBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text("\u201c${current?.comment}\u201d", style = MaterialTheme.typography.bodyMedium, color = c.ink)
+            }
+            Spacer(Modifier.height(12.dp))
+            return@Panel
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            reactionChoices.forEach { r ->
+                val on = current?.reaction == r
+                PhysicalButton(
+                    { onSave(if (on) null else r, comment) },
+                    Modifier.weight(1f).height(44.dp),
+                    latched = on,
+                    enabled = !busy,
+                    shape = RoundedCornerShape(12.dp),
+                    contentDescription = "${reactionLabel(r)}: $title",
+                ) { Text(reactionLabel(r).uppercase(), style = mono(11.sp)) }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        OutlinedTextField(
+            value = comment,
+            onValueChange = { comment = it.take(1000) },
+            placeholder = { Text(if (fromName.isBlank()) "A note back" else "A note back to $fromName") },
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 2,
+        )
+        Spacer(Modifier.height(8.dp))
+        PhysicalTextButton(
+            "Send the note back",
+            { onSave(current?.reaction, comment) },
+            Modifier.fillMaxWidth(),
+            enabled = !busy && comment.isNotBlank() && comment != current?.comment,
+        )
+        Spacer(Modifier.height(12.dp))
     }
 }

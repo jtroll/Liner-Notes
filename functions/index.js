@@ -14,12 +14,16 @@
 //   users/{uid}.fcmTokens       the phone's push tokens (the app adds them; these Functions prune)
 //   invites/{token}             inviterUid, inviterName, forName, status (open, accepted),
 //                               expiresAt, acceptedBy, pairId. Only these Functions read them.
-//   pairs/{uid1_uid2}           members [uid, uid], names {uid: name}, createdAt
+//   pairs/{uid1_uid2}           members [uid, uid], names {uid: name}, createdAt, and the pair's
+//                               settings: nickname, monthlyOn, draftDay (1 to 28), decemberPause
 //   sends/{uid_setId[_test]}    one scheduled or delivered set: senderUid, fromName, recipientUid
 //                               (null until the invite is accepted), inviteToken, pairId, status
 //                               (scheduled, delivered), deliverAt, deliveredAt, booklet (the
 //                               recipient's copy, as JSON). The sender reads their own; the
 //                               recipient reads it only once delivered. Only these Functions write.
+//                               Monthly sends (kind "monthly", month "yyyy-mm") have the id
+//                               uid_myyyymm_<pair hash>, one per person, pair and month.
+//                               reactions {index: {reaction, comment, at}} come from the recipient.
 
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
@@ -35,6 +39,7 @@ const spotify = require("./lib/spotify");
 const facts = require("./lib/facts");
 const notes = require("./lib/notes");
 const sends = require("./lib/sends");
+const monthly = require("./lib/monthly");
 const Anthropic = require("@anthropic-ai/sdk");
 
 initializeApp();
@@ -329,18 +334,17 @@ async function displayName(uid, fallback) {
   return (typeof name === "string" && name.trim()) || fallback || "";
 }
 
-/** Pushes the "you've got a set" notification to the recipient's phones. Never throws. */
-async function notifyDelivered(sendId, data) {
+/** Pushes a notification to every phone a person has registered, pruning dead tokens. Never throws. */
+async function pushTo(uid, notification, data) {
   try {
-    const user = await userDoc(data.recipientUid).get();
+    const user = await userDoc(uid).get();
     const tokens = (user.exists && user.get("fcmTokens")) || [];
     if (!Array.isArray(tokens) || !tokens.length) return;
-    const booklet = JSON.parse(data.booklet);
-    const n = sends.notification(data.fromName, booklet);
+    const strings = Object.fromEntries(Object.entries(data || {}).map(([k, v]) => [k, String(v)]));
     const result = await getMessaging().sendEachForMulticast({
       tokens: tokens.slice(0, 20),
-      notification: n,
-      data: { sendId },
+      notification,
+      data: strings,
       android: { priority: "high", notification: { channelId: "sends" } },
     });
     const dead = [];
@@ -350,7 +354,17 @@ async function notifyDelivered(sendId, data) {
         dead.push(tokens[i]);
       }
     });
-    if (dead.length) await userDoc(data.recipientUid).update({ fcmTokens: FieldValue.arrayRemove(...dead) });
+    if (dead.length) await userDoc(uid).update({ fcmTokens: FieldValue.arrayRemove(...dead) });
+  } catch (err) {
+    logger.warn("push failed", { uid, message: err.message });
+  }
+}
+
+/** Pushes the "you've got a set" notification to the recipient's phones. Never throws. */
+async function notifyDelivered(sendId, data) {
+  try {
+    const booklet = JSON.parse(data.booklet);
+    await pushTo(data.recipientUid, sends.notification(data.fromName, booklet), { sendId });
   } catch (err) {
     logger.warn("notifyDelivered failed", { sendId, message: err.message });
   }
@@ -431,6 +445,9 @@ exports.acceptInvite = onCall(async (request) => {
         {
           members: [invite.inviterUid, uid],
           names: { [invite.inviterUid]: invite.inviterName || "", [uid]: myName },
+          monthlyOn: true,
+          draftDay: monthly.DEFAULT_DRAFT_DAY,
+          decemberPause: true,
           createdAt: FieldValue.serverTimestamp(),
         },
         { merge: true },
@@ -472,6 +489,7 @@ exports.scheduleSend = onCall(async (request) => {
     throw new HttpsError("invalid-argument", "Pick a delivery date within the next year.");
   }
   const fromName = optString(d, "fromName", 80) || (await displayName(uid, request.auth.token.name));
+  if (!test && d.kind === "monthly") return sendMonthly(uid, d, booklet, fromName);
 
   let recipientUid = null;
   let pairId = null;
@@ -554,3 +572,235 @@ exports.deliverDueSends = onSchedule({ schedule: "every 15 minutes", timeoutSeco
   }
   if (count) logger.info("deliverDueSends", { delivered: count });
 });
+
+// ---- Monthly send -------------------------------------------------------------------------
+//
+// Each month each person sends the other one album they loved last month (SPEC.md, "Monthly
+// send"). The app gathers its own candidates from its Last.fm charts; monthlySuggest adds what
+// only the backend should see (the recipient's listening, what's been sent in the pair, how past
+// picks landed) and asks Claude for one pick and two alternates. Sending goes through
+// scheduleSend with kind "monthly", which delivers straight away.
+
+/** The pair, if the caller is one of its two members. */
+async function memberPair(uid, pairId) {
+  if (typeof pairId !== "string" || !pairId || pairId.length > 200) throw new HttpsError("invalid-argument", "Missing pairId.");
+  const snap = await db.collection("pairs").doc(pairId).get();
+  const members = (snap.exists && snap.get("members")) || [];
+  if (!members.includes(uid)) throw new HttpsError("permission-denied", "That isn't one of your pairs.");
+  const data = snap.data();
+  return { ref: snap.ref, data, partnerUid: members.find((m) => m !== uid), names: data.names || {} };
+}
+
+const heading = (album) => `${album.artist} — ${album.title}`;
+
+exports.monthlySuggest = onCall({ secrets: [ANTHROPIC_API_KEY], timeoutSeconds: 180 }, async (request) => {
+  const uid = requireUid(request);
+  const d = request.data || {};
+  const { partnerUid, names } = await memberPair(uid, d.pairId);
+  const candidates = monthly.cleanCandidates(d.candidates);
+  if (!candidates.length) throw new HttpsError("failed-precondition", "No albums to choose from yet.");
+
+  // Everything already sent within the pair, both ways, and how this sender's picks landed.
+  const sent = new Set();
+  const reactions = { loved: [], liked: [], notForMe: [] };
+  const recent = [];
+  const pairSends = await db.collection("sends").where("pairId", "==", d.pairId).get();
+  for (const doc of pairSends.docs) {
+    for (const k of monthly.bookletKeys(doc.get("booklet"))) sent.add(k);
+    if (doc.get("senderUid") !== uid || doc.get("test")) continue;
+    let entries = [];
+    try {
+      entries = JSON.parse(doc.get("booklet")).entries || [];
+    } catch (_) {
+      continue;
+    }
+    for (const [i, r] of Object.entries(doc.get("reactions") || {})) {
+      const e = entries[Number(i)];
+      if (e && r && reactions[r.reaction]) reactions[r.reaction].push(heading(e.album));
+    }
+    if (doc.get("kind") === "monthly" && entries[0]) {
+      recent.push({ at: doc.get("deliverAt") ? doc.get("deliverAt").toMillis() : 0, h: heading(entries[0].album) });
+    }
+  }
+
+  // The recipient's taste, from their Last.fm. Never returned to the sender as such.
+  const taste = { coreArtists: [], recentArtists: [], recentAlbums: [], typed: optString(d, "taste", 1500) };
+  let known = new Set();
+  const partner = await userDoc(partnerUid).get();
+  const lfm = partner.exists ? partner.get("lastfm.username") : null;
+  if (lfm) {
+    const key = LASTFM_API_KEY.value();
+    const safe = (p) => p.catch((err) => {
+      logger.warn("recipient taste read failed", { message: err.message });
+      return [];
+    });
+    const [year, ever, recentArtists, recentAlbums, allAlbums] = await Promise.all([
+      safe(lastfm.topArtists(key, lfm, "12month", 30)),
+      safe(lastfm.topArtists(key, lfm, "overall", 30)),
+      safe(lastfm.topArtists(key, lfm, "3month", 15)),
+      safe(lastfm.topAlbums(key, lfm, "3month", 15)),
+      safe(lastfm.topAlbums(key, lfm, "overall", 500)),
+    ]);
+    taste.coreArtists = [...new Set([...year, ...ever].map((a) => a.name))];
+    taste.recentArtists = recentArtists.map((a) => a.name);
+    taste.recentAlbums = recentAlbums.map(heading);
+    known = monthly.knownAlbums(allAlbums);
+  }
+
+  const fresh = monthly.filterCandidates(candidates, known, sent);
+  if (!fresh.length) {
+    return { picks: [], stretch: false, excluded: candidates.length };
+  }
+  try {
+    const picks = await notes.suggestMonthly(ANTHROPIC_API_KEY.value(), {
+      senderName: optString(d, "senderName", 80) || names[uid] || "",
+      recipientName: names[partnerUid] || "",
+      month: optString(d, "rangeLabel", 60),
+      candidates: fresh,
+      taste,
+      reactions,
+      recentPicks: recent.sort((a, b) => b.at - a.at).slice(0, 6).map((r) => r.h),
+    });
+    const byId = new Map(fresh.map((c) => [c.id, c]));
+    return {
+      picks: picks.map((p) => {
+        const c = byId.get(p.id);
+        return { artist: c.artist, title: c.title, confidence: p.confidence, connection: p.connection, fromEarlier: c.fromEarlier };
+      }),
+      stretch: monthly.isStretch(picks),
+      excluded: candidates.length - fresh.length,
+    };
+  } catch (err) {
+    throw toHttpsError("monthlySuggest", err);
+  }
+});
+
+/** scheduleSend for kind "monthly": one album to the other member of the pair, delivered now. */
+async function sendMonthly(uid, d, booklet, fromName) {
+  const month = d.month;
+  if (!monthly.isMonth(month)) throw new HttpsError("invalid-argument", "Missing month.");
+  const { partnerUid } = await memberPair(uid, d.pairId);
+  if (booklet.entries.length !== 1) throw new HttpsError("invalid-argument", "A monthly send is one album.");
+  const ref = sendDoc(monthly.monthlySendId(uid, d.pairId, month));
+  const now = Date.now();
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (snap.exists) throw new HttpsError("already-exists", `You've already sent your ${monthly.monthName(month)} pick.`);
+    tx.create(ref, {
+      senderUid: uid,
+      fromName,
+      recipientUid: partnerUid,
+      inviteToken: null,
+      pairId: d.pairId,
+      setId: requireString(d, "setId", 64),
+      kind: "monthly",
+      month,
+      test: false,
+      status: "scheduled",
+      deliverAt: Timestamp.fromMillis(now),
+      deliveredAt: null,
+      booklet: JSON.stringify({ ...booklet, kind: "monthly", month }),
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+  });
+  const deliveredNow = await deliver(ref);
+  return { sendId: ref.id, status: deliveredNow ? "delivered" : "scheduled", deliverAt: now, waitingForJoin: false };
+}
+
+// The recipient's reaction to one album of a send: loved, liked or not for me, and a comment.
+exports.reactToSend = onCall(async (request) => {
+  const uid = requireUid(request);
+  const d = request.data || {};
+  const ref = sendDoc(requireString(d, "sendId", 200));
+  const result = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists || snap.get("recipientUid") !== uid || snap.get("status") !== "delivered") {
+      throw new HttpsError("not-found", "That send isn't in your inbox.");
+    }
+    let entries;
+    try {
+      entries = JSON.parse(snap.get("booklet")).entries || [];
+    } catch (_) {
+      throw new HttpsError("failed-precondition", "That send can't be read.");
+    }
+    let r;
+    try {
+      r = monthly.cleanReaction(d, entries.length);
+    } catch (err) {
+      throw new HttpsError("invalid-argument", err.message);
+    }
+    const before = (snap.get("reactions") || {})[String(r.index)] || null;
+    const field = `reactions.${r.index}`;
+    if (r.reaction === null && !r.comment) tx.update(ref, { [field]: FieldValue.delete() });
+    else tx.update(ref, { [field]: { reaction: r.reaction, comment: r.comment, at: Timestamp.now() } });
+    const changed = !before || before.reaction !== r.reaction || (r.comment && before.comment !== r.comment);
+    return { ...r, changed, senderUid: snap.get("senderUid"), test: snap.get("test") === true, album: entries[r.index].album };
+  });
+  if (result.changed && !result.test && (result.reaction || result.comment)) {
+    const name = await displayName(uid, request.auth.token.name);
+    await pushTo(
+      result.senderUid,
+      {
+        title: `${name || "They"} ${monthly.reactionWord(result.reaction)} ${result.album.title}`,
+        body: result.comment || heading(result.album),
+      },
+      { sendId: ref.id, kind: "reaction" },
+    );
+  }
+  return { saved: true };
+});
+
+// The pair's settings: nickname, monthly on or off, the draft day, the December pause.
+exports.updatePair = onCall(async (request) => {
+  const uid = requireUid(request);
+  const d = request.data || {};
+  const { ref } = await memberPair(uid, d.pairId);
+  let changes;
+  try {
+    changes = monthly.cleanPairSettings(d);
+  } catch (err) {
+    throw new HttpsError("invalid-argument", err.message);
+  }
+  if (Object.keys(changes).length) await ref.update({ ...changes, updatedAt: FieldValue.serverTimestamp() });
+  return { saved: true };
+});
+
+/** Whether the member has a group send to the pair delivering in this December. */
+async function hasDecemberSet(uid, pairId, now) {
+  const year = Number(monthly.monthKey(now).slice(0, 4));
+  const snap = await db.collection("sends").where("senderUid", "==", uid).where("pairId", "==", pairId).get();
+  return snap.docs.some((doc) => {
+    if (doc.get("kind") === "monthly" || doc.get("test")) return false;
+    const at = doc.get("deliverAt");
+    return !!at && monthly.monthKey(at.toDate()) === `${year}-12`;
+  });
+}
+
+// Each morning: "time for your pick" on the pair's draft day, and a nudge a week later and on the
+// 25th to anyone whose month's send hasn't gone.
+exports.monthlyReminders = onSchedule(
+  { schedule: "0 10 * * *", timeZone: monthly.TIME_ZONE, timeoutSeconds: 300 },
+  async () => {
+    const now = new Date();
+    const month = monthly.monthKey(now);
+    const day = monthly.dayOfMonth(now);
+    const pairs = await db.collection("pairs").get();
+    let count = 0;
+    for (const p of pairs.docs) {
+      const data = p.data();
+      const members = data.members || [];
+      if (members.length !== 2) continue;
+      for (const uid of members) {
+        const partner = members.find((m) => m !== uid);
+        const sent = (await sendDoc(monthly.monthlySendId(uid, p.id, month)).get()).exists;
+        const paused = month.endsWith("-12") && data.decemberPause !== false && (await hasDecemberSet(uid, p.id, now));
+        const kind = monthly.reminderFor({ day, draftDay: data.draftDay, sent, monthlyOn: data.monthlyOn, paused });
+        if (!kind) continue;
+        await pushTo(uid, monthly.reminderText(kind, (data.names || {})[partner], month), { kind: "monthly", pairId: p.id });
+        count++;
+      }
+    }
+    if (count) logger.info("monthlyReminders", { sent: count });
+  },
+);

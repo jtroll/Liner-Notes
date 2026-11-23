@@ -9,7 +9,14 @@ import com.google.firebase.firestore.SetOptions
 import com.google.firebase.functions.FirebaseFunctions
 import com.google.firebase.messaging.FirebaseMessaging
 import android.util.Log
+import com.trollman.linernotes.data.Candidate
 import com.trollman.linernotes.data.Fit
+import com.trollman.linernotes.data.PairInfo
+import com.trollman.linernotes.data.Pick
+import com.trollman.linernotes.data.Reaction
+import com.trollman.linernotes.data.SetAlbum
+import com.trollman.linernotes.data.Suggestions
+import com.trollman.linernotes.data.albumKey
 import com.trollman.linernotes.data.GroupSet
 import com.trollman.linernotes.data.Invite
 import com.trollman.linernotes.data.InviteInfo
@@ -70,6 +77,8 @@ class Cloud {
         isCloser: Boolean,
         instruction: String? = null,
         previous: String? = null,
+        isMonthly: Boolean = false,
+        connection: String? = null,
     ): Draft {
         val r = call(
             "draftNote",
@@ -79,6 +88,7 @@ class Cloud {
                 "plays" to plays, "weeks" to weeks, "rangeLabel" to rangeLabel,
                 "favoriteTracks" to favoriteTracks, "isCloser" to isCloser,
                 "style" to style(writing), "instruction" to instruction, "previous" to previous,
+                "isMonthly" to isMonthly, "connection" to connection,
             ),
             timeoutSeconds = 300,
         )
@@ -195,12 +205,16 @@ class Cloud {
         inviteToken: String?,
         fromName: String,
         test: Boolean,
+        pairId: String? = null,
+        kind: String = "group",
+        month: String? = null,
     ): Scheduled {
         val r = call(
             "scheduleSend",
             mapOf(
                 "setId" to setId, "booklet" to bookletJson, "deliverAt" to deliverAt,
                 "inviteToken" to inviteToken, "fromName" to fromName, "test" to test,
+                "pairId" to pairId, "kind" to kind, "month" to month,
             ),
         )
         return Scheduled(
@@ -229,6 +243,12 @@ class Cloud {
                         deliveredAt = d.getTimestamp("deliveredAt")?.toDate()?.time,
                         recipientJoined = d.getString("recipientUid") != null,
                         test = d.getBoolean("test") ?: false,
+                        pairId = d.getString("pairId"),
+                        kind = d.getString("kind") ?: "group",
+                        month = d.getString("month"),
+                        fromName = d.getString("fromName") ?: "",
+                        set = d.getString("booklet")?.let { booklet(it) },
+                        reactions = reactions(d.get("reactions")),
                     )
                 }
             )
@@ -246,10 +266,7 @@ class Cloud {
                 if (snap == null) return@addSnapshotListener
                 trySend(
                     snap.documents.mapNotNull { d ->
-                        val json = d.getString("booklet") ?: return@mapNotNull null
-                        val set = runCatching { storeJson.decodeFromString<GroupSet>(json) }
-                            .onFailure { Log.w(TAG, "Unreadable booklet ${d.id}", it) }
-                            .getOrNull() ?: return@mapNotNull null
+                        val set = d.getString("booklet")?.let { booklet(it) } ?: return@mapNotNull null
                         Received(
                             id = d.id,
                             fromName = d.getString("fromName") ?: "",
@@ -257,11 +274,104 @@ class Cloud {
                                 ?: d.getTimestamp("deliverAt")?.toDate()?.time ?: 0L,
                             set = set,
                             test = d.getBoolean("test") ?: false,
+                            pairId = d.getString("pairId"),
+                            kind = d.getString("kind") ?: "group",
+                            reactions = reactions(d.get("reactions")),
                         )
                     }.sortedByDescending { it.deliveredAt }
                 )
             }
         awaitClose { reg.remove() }
+    }
+
+    private fun booklet(json: String): GroupSet? =
+        runCatching { storeJson.decodeFromString<GroupSet>(json) }
+            .onFailure { Log.w(TAG, "Unreadable booklet", it) }
+            .getOrNull()
+
+    private fun reactions(raw: Any?): Map<Int, Reaction> =
+        (raw as? Map<*, *>).orEmpty().mapNotNull { (k, v) ->
+            val i = (k as? String)?.toIntOrNull() ?: return@mapNotNull null
+            val m = v as? Map<*, *> ?: return@mapNotNull null
+            i to Reaction(m["reaction"] as? String, m["comment"] as? String ?: "")
+        }.toMap()
+
+    // ---- Monthly send (functions/index.js, "Monthly send") -------------------------------------
+
+    /** The signed-in person's pairs, live. */
+    fun pairs(uid: String): Flow<List<PairInfo>> = callbackFlow {
+        val reg = db.collection("pairs").whereArrayContains("members", uid).addSnapshotListener { snap, err ->
+            if (err != null) Log.w(TAG, "Watching pairs failed", err)
+            if (snap == null) return@addSnapshotListener
+            trySend(
+                snap.documents.mapNotNull { d ->
+                    val members = (d.get("members") as? List<*>).orEmpty().filterIsInstance<String>()
+                    val partner = members.firstOrNull { it != uid } ?: return@mapNotNull null
+                    val names = d.get("names") as? Map<*, *>
+                    PairInfo(
+                        id = d.id,
+                        partnerUid = partner,
+                        partnerName = names?.get(partner) as? String ?: "",
+                        nickname = d.getString("nickname") ?: "",
+                        monthlyOn = d.getBoolean("monthlyOn") ?: true,
+                        draftDay = d.getLong("draftDay")?.toInt() ?: 1,
+                        decemberPause = d.getBoolean("decemberPause") ?: true,
+                    )
+                }.sortedBy { it.label.lowercase() }
+            )
+        }
+        awaitClose { reg.remove() }
+    }
+
+    /**
+     * Claude's pick and two alternates from [candidates], with the recipient's taste and the pair's
+     * history added on the server (the app never sees the recipient's listening).
+     */
+    suspend fun monthlySuggest(
+        pairId: String,
+        candidates: List<Candidate>,
+        senderName: String,
+        rangeLabel: String,
+    ): Suggestions {
+        val r = call(
+            "monthlySuggest",
+            mapOf(
+                "pairId" to pairId,
+                "senderName" to senderName,
+                "rangeLabel" to rangeLabel,
+                "candidates" to candidates.map {
+                    mapOf(
+                        "artist" to it.album.artist, "title" to it.album.title,
+                        "plays" to it.album.plays, "weeks" to it.album.weeks, "fromEarlier" to it.fromEarlier,
+                    )
+                },
+            ),
+            timeoutSeconds = 180,
+        )
+        val byKey = candidates.associateBy { it.album.key }
+        val picks = (r["picks"] as? List<*>).orEmpty().mapNotNull { p ->
+            val m = p as? Map<*, *> ?: return@mapNotNull null
+            val artist = m["artist"] as? String ?: return@mapNotNull null
+            val title = m["title"] as? String ?: return@mapNotNull null
+            val album = byKey[albumKey(artist, title)]?.album ?: SetAlbum(artist, title)
+            Pick(
+                album = album,
+                connection = m["connection"] as? String ?: "",
+                confidence = (m["confidence"] as? Number)?.toInt() ?: 3,
+                fromEarlier = m["fromEarlier"] as? Boolean ?: false,
+            )
+        }
+        return Suggestions(picks, r["stretch"] as? Boolean ?: false, (r["excluded"] as? Number)?.toInt() ?: 0)
+    }
+
+    /** The recipient's reaction to one album of a send (null clears it). */
+    suspend fun react(sendId: String, index: Int, reaction: String?, comment: String) {
+        call("reactToSend", mapOf("sendId" to sendId, "index" to index, "reaction" to reaction, "comment" to comment))
+    }
+
+    /** Changes the pair's settings: any of nickname, monthlyOn, draftDay, decemberPause. */
+    suspend fun updatePair(pairId: String, changes: Map<String, Any>) {
+        call("updatePair", changes + ("pairId" to pairId))
     }
 
     /** Saves this phone's push token on the user document, so delivered sets can ping it. */

@@ -254,6 +254,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** A "set has arrived" notification was tapped. */
     fun openSend(sendId: String) = _ui.update { it.copy(goTo = "send:$sendId") }
 
+    /** A tapped monthly reminder: straight to that pair. */
+    fun openPair(pairId: String) = _ui.update { it.copy(goTo = "pair:$pairId") }
+
     fun consumeGoTo() = _ui.update { it.copy(goTo = null) }
 
     // ---- Last.fm --------------------------------------------------------------------------------

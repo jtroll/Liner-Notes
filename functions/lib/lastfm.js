@@ -33,4 +33,43 @@ async function getSession(apiKey, secret, token) {
   return { name: body.session.name, key: body.session.key };
 }
 
-module.exports = { signature, getSession };
+/** One unsigned call to Last.fm's public methods. Throws with Last.fm's own message on an error. */
+async function publicCall(apiKey, method, params) {
+  const url = new URL(API);
+  for (const [k, v] of Object.entries({ method, api_key: apiKey, format: "json", ...params })) url.searchParams.set(k, String(v));
+  const res = await fetch(url, { headers: { "User-Agent": UA } });
+  const body = await res.json().catch(() => ({}));
+  if (body.error) {
+    const err = new Error(body.message || `Last.fm said ${res.status}`);
+    err.lastfmCode = body.error;
+    throw err;
+  }
+  return body;
+}
+
+const asList = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+
+/** user.getTopArtists, as [{name, plays}]. */
+function parseTopArtists(body) {
+  return asList(body && body.topartists && body.topartists.artist)
+    .filter((a) => a && a.name)
+    .map((a) => ({ name: String(a.name), plays: Number(a.playcount) || 0 }));
+}
+
+/** user.getTopAlbums, as [{artist, title, plays}]. */
+function parseTopAlbums(body) {
+  return asList(body && body.topalbums && body.topalbums.album)
+    .filter((a) => a && a.name && a.artist)
+    .map((a) => ({ artist: String(a.artist.name || a.artist["#text"] || ""), title: String(a.name), plays: Number(a.playcount) || 0 }))
+    .filter((a) => a.artist);
+}
+
+async function topArtists(apiKey, user, period, limit) {
+  return parseTopArtists(await publicCall(apiKey, "user.gettopartists", { user, period, limit }));
+}
+
+async function topAlbums(apiKey, user, period, limit) {
+  return parseTopAlbums(await publicCall(apiKey, "user.gettopalbums", { user, period, limit }));
+}
+
+module.exports = { signature, getSession, publicCall, parseTopArtists, parseTopAlbums, topArtists, topAlbums };

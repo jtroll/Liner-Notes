@@ -43,7 +43,7 @@ Repo > Settings > Secrets and variables > Actions.
   Google Cloud console > IAM & Admin > Service accounts > create `ci-deploy` with these roles:
   Firebase Admin, Firebase App Distribution Admin, Cloud Functions Admin, Service Account User,
   Secret Manager Admin, Service Usage Admin, Cloud Build Editor, Artifact Registry Administrator,
-  Cloud Scheduler Admin (for the delivery job).
+  Cloud Scheduler Admin (for the delivery and monthly reminder jobs).
   Keys > Add key > JSON, and paste the whole file as the secret's value.
 
 **Variables**
@@ -91,7 +91,7 @@ others.) The deploy fails until all three exist, because the Functions name them
 ## 6. Deploy and install
 
 1. Merge the open pull request into `main` (or re-run the **Backend** workflow on main). It
-   deploys the Functions (including the 15-minute delivery job, which turns on Cloud Scheduler),
+   deploys the Functions (including the 15-minute delivery job and the daily monthly-reminder job, which turn on Cloud Scheduler),
    the Firestore rules and indexes, and the Last.fm callback and invite pages.
 2. On the phone: accept the App Distribution email invite and install **Firebase App Tester**.
    Each push to any branch then arrives there as an update.

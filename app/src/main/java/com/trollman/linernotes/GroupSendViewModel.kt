@@ -6,7 +6,13 @@ import androidx.compose.runtime.Immutable
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.firebase.functions.FirebaseFunctionsException
+import com.trollman.linernotes.data.Candidate
 import com.trollman.linernotes.data.CloudSetStore
+import com.trollman.linernotes.data.Invite
+import com.trollman.linernotes.data.Monthly
+import com.trollman.linernotes.data.PairInfo
+import com.trollman.linernotes.data.Pick
+import java.time.YearMonth
 import com.trollman.linernotes.data.DemoAlbums
 import com.trollman.linernotes.data.GroupSet
 import com.trollman.linernotes.data.LocalSetStore
@@ -58,8 +64,32 @@ data class GroupState(
     /** Sets delivered to this person, newest first. */
     val inbox: List<Received> = emptyList(),
     val inboxReady: Boolean = false,
+    /** Every live send of this person's, test copies included, by send id. */
+    val sendsById: Map<String, SendInfo> = emptyMap(),
+    /** The pairs this person is in (SPEC.md, "Pairs and accounts"). */
+    val pairs: List<PairInfo> = emptyList(),
+    val pairsReady: Boolean = false,
+    /** Album search results for picking any album for a monthly send. */
+    val search: List<SetAlbum>? = null,
+    /** The last standalone invite link made from the pairs screen. */
+    val pairInvite: Invite? = null,
 ) {
     val current: GroupSet? get() = sets.firstOrNull { it.id == openId }
+    val groupSets: List<GroupSet> get() = sets.filterNot { it.isMonthly }
+
+    /** This month's monthly set for a pair, if one has been started. */
+    fun monthlyFor(pairId: String, month: String = Monthly.monthKey()): GroupSet? =
+        sets.firstOrNull { it.isMonthly && it.pairId == pairId && it.month == month }
+
+    /** The sender's monthly send to a pair for a month, once sent. */
+    fun sentMonthly(pairId: String, month: String = Monthly.monthKey()): SendInfo? =
+        sendsById.values.firstOrNull { it.kind == "monthly" && it.pairId == pairId && it.month == month && !it.test }
+
+    /** Sends both ways within a pair, newest first, as the recipient sees them. */
+    fun history(pairId: String): List<Received> =
+        (inbox.filter { it.pairId == pairId && !it.test } +
+            sendsById.values.filter { it.pairId == pairId && it.delivered && !it.test }.mapNotNull { it.asReceived() })
+            .sortedByDescending { it.deliveredAt }
 }
 
 /**
@@ -298,6 +328,7 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun rangeLabel(s: GroupSet): String {
         val f = DateTimeFormatter.ofPattern("MMMM d", Locale.getDefault())
+        if (s.isMonthly && s.month != null) return "in ${Monthly.monthName(Monthly.listeningMonth(s.month))}"
         return if (s.yearList) "this year, since January 1" else "between ${s.from.format(f)} and ${s.to.format(f)}"
     }
 
@@ -329,6 +360,8 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
                 isCloser = s.yearList && s.entries.size > 1 && index == s.entries.lastIndex,
                 instruction = instruction?.takeIf { it.isNotBlank() },
                 previous = entry.note.takeIf { instruction != null && it.isNotBlank() },
+                isMonthly = s.isMonthly,
+                connection = entry.connection.ifBlank { null },
             )
             if (draft.note.isBlank()) {
                 say("The draft for ${entry.album.title} came back empty. Try again.")
@@ -431,18 +464,23 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
     /** Follows this person's sends and inbox in Firestore. */
     private fun watchSends(uid: String?) {
         liveJobs.forEach { it.cancel() }
-        _state.update { it.copy(sends = emptyMap(), inbox = emptyList(), inboxReady = false) }
+        _state.update { it.copy(sends = emptyMap(), sendsById = emptyMap(), inbox = emptyList(), inboxReady = false, pairs = emptyList(), pairsReady = false) }
         val cloud = graph.cloud
         if (uid == null || cloud == null) {
             liveJobs = emptyList()
-            _state.update { it.copy(inboxReady = true) }
+            _state.update { it.copy(inboxReady = true, pairsReady = true) }
             return
         }
         liveJobs = listOf(
             viewModelScope.launch {
                 cloud.sendsFrom(uid).collect { list ->
-                    _state.update { s -> s.copy(sends = list.filter { !it.test }.associateBy { it.setId }) }
+                    _state.update { s ->
+                        s.copy(sends = list.filter { !it.test }.associateBy { it.setId }, sendsById = list.associateBy { it.id })
+                    }
                 }
+            },
+            viewModelScope.launch {
+                cloud.pairs(uid).collect { list -> _state.update { it.copy(pairs = list, pairsReady = true) } }
             },
             viewModelScope.launch {
                 cloud.inbox(uid).collect { list -> _state.update { it.copy(inbox = list, inboxReady = true) } }
@@ -519,6 +557,204 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 busy("send:$id", false)
             }
+        }
+    }
+
+    // ---- Monthly send (SPEC.md, "Monthly send") --------------------------------------------------
+
+    /**
+     * Opens this month's pick for [pair], starting it (and asking for a suggestion) the first
+     * time. Returns the set's id.
+     */
+    fun openMonthly(pair: PairInfo): String {
+        val month = Monthly.monthKey()
+        _state.value.monthlyFor(pair.id, month)?.let { existing ->
+            if (existing.picks.isEmpty() && existing.entries.isEmpty() && _state.value.sentMonthly(pair.id, month) == null) suggest(existing.id)
+            return existing.id
+        }
+        val listening = Monthly.listeningMonth(month)
+        val set = GroupSet(
+            title = "${Monthly.monthName(month)} pick",
+            forName = pair.partnerName,
+            fromDay = listening.atDay(1).toString(),
+            toDay = listening.atEndOfMonth().toString(),
+            count = 1,
+            kind = "monthly",
+            pairId = pair.id,
+            month = month,
+        )
+        _state.update { it.copy(sets = listOf(set) + it.sets) }
+        viewModelScope.launch { runCatching { store.save(set) }.onFailure { Log.w(TAG, "Saving monthly set failed", it) } }
+        if (_state.value.sentMonthly(pair.id, month) == null) suggest(set.id)
+        return set.id
+    }
+
+    /**
+     * Step 3 and 4: the albums the sender played heavily last month (widened to 3 months when
+     * there are fewer than 3), then Claude's pick and two alternates. The pick's note is drafted
+     * straight away.
+     */
+    fun suggest(id: String) {
+        val s = set(id) ?: return
+        val pairId = s.pairId ?: return
+        val month = s.month ?: return
+        val user = _state.value.lastfmUser
+        if (user.isNullOrBlank()) return say("Connect Last.fm in Settings so the app can see what you played last month.")
+        val cloud = graph.cloud ?: return say("Suggestions need the backend (docs/SETUP.md).")
+        val key = "suggest:$id"
+        if (key in _state.value.busy) return
+        viewModelScope.launch {
+            busy(key, true)
+            try {
+                val listening = Monthly.listeningMonth(month)
+                val candidates = monthlyCandidates(user, listening)
+                if (candidates.isEmpty()) {
+                    say("Nothing played heavily in ${Monthly.monthName(listening)} or the months before. Search for any album instead.")
+                    return@launch
+                }
+                val result = cloud.monthlySuggest(pairId, candidates, fromName(), Monthly.monthName(listening))
+                if (result.picks.isEmpty()) {
+                    say("Everything you played a lot is already known to ${s.forName.ifBlank { "them" }} or already sent. Search for any album instead.")
+                    return@launch
+                }
+                edit(id) { it.copy(picks = result.picks, stretch = result.stretch) }
+                fillPickCovers(id)
+                val current = set(id)?.entries?.firstOrNull()
+                if (current == null || current.note.isBlank()) choose(id, result.picks.first())
+            } catch (e: Exception) {
+                Log.w(TAG, "Suggestion failed", e)
+                say("Couldn't suggest an album: ${describeError(e)}")
+            } finally {
+                _state.update { it.copy(progress = null) }
+                busy(key, false)
+            }
+        }
+    }
+
+    private suspend fun monthlyCandidates(user: String, listening: YearMonth): List<Candidate> {
+        val zone = ZoneId.systemDefault()
+        val end = listening.plusMonths(1).atDay(1).atStartOfDay(zone).toEpochSecond()
+        val start = listening.atDay(1).atStartOfDay(zone).toEpochSecond()
+        val last = Ranking.aggregate(lastFm.rangeCharts(user, start, end, onProgress = { d, t ->
+            _state.update { it.copy(progress = d to t) }
+        }) { u, f, t -> weeklyAlbumChart(u, f, t) })
+        val tracks = trackCounts(last.filter { it.plays < Monthly.MIN_TRACK_PLAYS }.sortedByDescending { it.plays }.take(15))
+        val recent = Monthly.candidates(last, null, tracks)
+        if (recent.size >= Monthly.MIN_CANDIDATES) return recent
+        val quarterStart = listening.minusMonths(2).atDay(1).atStartOfDay(zone).toEpochSecond()
+        val quarter = Ranking.aggregate(lastFm.rangeCharts(user, quarterStart, end) { u, f, t -> weeklyAlbumChart(u, f, t) })
+        val more = trackCounts(quarter.filter { it.plays < Monthly.MIN_TRACK_PLAYS }.sortedByDescending { it.plays }.take(15))
+        return Monthly.candidates(last, quarter, tracks + more)
+    }
+
+    /** Track counts from album.getInfo, four at a time, for the near-full-plays rule. */
+    private suspend fun trackCounts(albums: List<SetAlbum>): Map<String, Int> = coroutineScope {
+        val gate = Semaphore(4)
+        albums.map { a -> async { gate.withPermit { a.key to (info(a)?.tracks?.size ?: 0) } } }
+            .awaitAll().filter { it.second > 0 }.toMap()
+    }
+
+    private suspend fun fillPickCovers(id: String) = coroutineScope {
+        val s = set(id) ?: return@coroutineScope
+        val gate = Semaphore(4)
+        val covers = s.picks.map { it.album }.filter { it.imageUrl == null }.map { a ->
+            async { gate.withPermit { a.key to info(a)?.imageUrl } }
+        }.awaitAll().filter { it.second != null }.toMap()
+        if (covers.isEmpty()) return@coroutineScope
+        edit(id, touch = false) { set ->
+            set.copy(
+                picks = set.picks.map { p -> covers[p.album.key]?.let { p.copy(album = p.album.copy(imageUrl = it)) } ?: p },
+                entries = set.entries.map { e -> covers[e.key]?.let { e.copy(album = e.album.copy(imageUrl = it)) } ?: e },
+            )
+        }
+    }
+
+    /**
+     * Makes [pick] the album to send. The album being replaced is kept with its note, so
+     * flipping back to it loses nothing; an album without a note gets one drafted.
+     */
+    fun choose(id: String, pick: Pick) {
+        val s = set(id) ?: return
+        if (s.entries.firstOrNull()?.key == pick.album.key) return
+        val parked = s.parked.firstOrNull { it.key == pick.album.key }
+        val entry = parked ?: SetEntry(pick.album, connection = pick.connection)
+        edit(id) { set ->
+            val leaving = set.entries.filter { it.note.isNotBlank() }
+            set.copy(
+                entries = listOf(entry),
+                parked = (set.parked.filterNot { it.key == pick.album.key || leaving.any { l -> l.key == it.key } } + leaving).takeLast(10),
+            )
+        }
+        if (entry.favoriteTracks.isEmpty()) loadFavoriteTracks(id, pick.album)
+        if (entry.note.isBlank()) draftNote(id, pick.album.key)
+    }
+
+    /** Searches Last.fm for any album to send instead of a suggestion. */
+    fun search(query: String) {
+        if (query.isBlank()) return _state.update { it.copy(search = null) }
+        viewModelScope.launch {
+            busy("search", true)
+            runCatching { lastFm.albumSearch(query.trim()) }
+                .onSuccess { list -> _state.update { it.copy(search = list.map { a -> SetAlbum(a.artist, a.title, imageUrl = a.imageUrl, mbid = a.mbid) }) } }
+                .onFailure { e -> say("Search didn't work: ${describeError(e)}") }
+            busy("search", false)
+        }
+    }
+
+    fun clearSearch() = _state.update { it.copy(search = null) }
+
+    /** Sends the monthly pick now. The recipient gets it straight away, with a notification. */
+    fun sendMonthly(id: String) {
+        val cloud = graph.cloud ?: return say("Sending needs the backend (docs/SETUP.md).")
+        val s = set(id) ?: return
+        val entry = s.entries.firstOrNull() ?: return say("Pick an album first.")
+        if (entry.note.isBlank()) return say("Write a note first, or let Claude draft one.")
+        val key = "send:$id"
+        if (key in _state.value.busy) return
+        viewModelScope.launch {
+            busy(key, true)
+            try {
+                val json = storeJson.encodeToString(GroupSet.serializer(), s.forRecipient())
+                cloud.scheduleSend(id, json, System.currentTimeMillis(), null, fromName(), false, s.pairId, "monthly", s.month)
+                edit(id, touch = false) { it.copy(scheduledVersion = s.updatedAt) }
+                say("Sent ${entry.album.title} to ${s.forName.ifBlank { "them" }}.")
+            } catch (e: Exception) {
+                say("Couldn't send it: ${describeError(e)}")
+            } finally {
+                busy(key, false)
+            }
+        }
+    }
+
+    /** The recipient's reaction to one album of a send: "loved", "liked", "notForMe" or null. */
+    fun react(sendId: String, index: Int, reaction: String?, comment: String) {
+        val cloud = graph.cloud ?: return
+        viewModelScope.launch {
+            busy("react:$sendId:$index", true)
+            runCatching { cloud.react(sendId, index, reaction, comment.trim()) }
+                .onSuccess { if (comment.isNotBlank()) say("Sent your comment.") }
+                .onFailure { e -> say("Couldn't save that: ${describeError(e)}") }
+            busy("react:$sendId:$index", false)
+        }
+    }
+
+    /** Changes a pair's settings (monthlyOn, draftDay, decemberPause, nickname). */
+    fun updatePair(pairId: String, changes: Map<String, Any>) {
+        val cloud = graph.cloud ?: return
+        viewModelScope.launch {
+            runCatching { cloud.updatePair(pairId, changes) }.onFailure { e -> say("Couldn't change that: ${describeError(e)}") }
+        }
+    }
+
+    /** An invite link that forms a pair without a set riding on it. */
+    fun makePairInvite(forName: String) {
+        val cloud = graph.cloud ?: return say("Invites need the backend (docs/SETUP.md).")
+        viewModelScope.launch {
+            busy("pairInvite", true)
+            runCatching { cloud.createInvite(forName.trim(), fromName()) }
+                .onSuccess { invite -> _state.update { it.copy(pairInvite = invite) } }
+                .onFailure { e -> say("Couldn't make the invite: ${describeError(e)}") }
+            busy("pairInvite", false)
         }
     }
 

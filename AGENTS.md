@@ -44,6 +44,15 @@ stays out of this repository while the repository is public.
 - Invite links are `https://<project>.web.app/invite/<token>` (`hosting/invite`), which hands
   over to `linernotes://invite/<token>`; the app keeps the token through sign-in (`Prefs`) and asks
   "Join?" before accepting.
+- Monthly send (`functions/index.js`, "Monthly send"; pure parts in `functions/lib/monthly.js`):
+  the app gathers candidates from its own Last.fm charts for last month (`data/Monthly.kt`,
+  widened to 3 months when fewer than 3 qualify) and calls `monthlySuggest`, which adds the
+  recipient's Last.fm taste, the pair's past sends and reactions on the server and asks Claude for
+  one pick and two alternates. The recipient's listening never reaches the sender's phone. A
+  monthly draft is a `GroupSet` with `kind = "monthly"`, `pairId` and `month`; it goes out through
+  `scheduleSend` with `kind: "monthly"` (delivered at once, one per person, pair and month).
+  `reactToSend` stores the recipient's reactions on the send; `updatePair` changes pair settings;
+  `monthlyReminders` runs each morning (Pacific) for the draft day, a week later and the 25th.
 - The printable booklet is drawn on the phone (`print/BookletPdf.kt`): half-letter pages, or two
   to a letter sheet in fold order (`print/Imposition.kt`).
 

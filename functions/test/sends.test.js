@@ -101,3 +101,13 @@ test("send ids keep the test send apart", () => {
   assert.equal(sends.sendId("u", "s", false), "u_s");
   assert.equal(sends.sendId("u", "s", true), "u_s_test");
 });
+
+test("a monthly booklet keeps its kind and month, and its notification names the album", () => {
+  const b = sends.cleanBooklet({ ...set, kind: "monthly", month: "2027-01", entries: [set.entries[0]] });
+  assert.equal(b.kind, "monthly");
+  assert.equal(b.month, "2027-01");
+  assert.equal(sends.cleanBooklet(set).kind, "group");
+  const n = sends.notification("Sam", b);
+  assert.equal(n.title, "Sam sent you an album");
+  assert.match(n.body, /The Smile — Cutouts/);
+});

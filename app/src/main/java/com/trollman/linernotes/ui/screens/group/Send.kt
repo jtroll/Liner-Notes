@@ -269,7 +269,7 @@ fun PdfPanel(set: GroupSet, fromName: String) {
 
 /** Shows a spinner in place of [content] while [busy]. */
 @Composable
-private fun Busy(busy: Boolean, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+internal fun Busy(busy: Boolean, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         if (busy) {
             Column(Modifier.height(52.dp), verticalArrangement = Arrangement.Center) {

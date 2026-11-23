@@ -94,6 +94,10 @@ class LastFm(private val apiKey: String, private val callbackUrl: String) {
     suspend fun albumInfo(artist: String, title: String): AlbumInfo =
         parseAlbumInfo(get("album.getinfo", mapOf("artist" to artist, "album" to title, "autocorrect" to "1")))
 
+    /** Last.fm's album search, for sending any album, not just a suggestion. */
+    suspend fun albumSearch(query: String, limit: Int = 10): List<Album> =
+        parseAlbumSearch(get("album.search", mapOf("album" to query, "limit" to "$limit")))
+
     /**
      * Every weekly chart overlapping [fromSec]..[toSec], fetched four at a time, plus the
      * unfinished current week where Last.fm will give it. [onProgress] gets (done, total).
@@ -186,6 +190,19 @@ class LastFm(private val apiKey: String, private val callbackUrl: String) {
                 ?.takeUnless { it.contains(PLACEHOLDER_IMAGE) }
             val tracks = items((album["tracks"] as? JsonObject)?.get("track")).mapNotNull { it.str("name") }
             return AlbumInfo(image, tracks, album.str("url"))
+        }
+
+        fun parseAlbumSearch(root: JsonObject): List<Album> {
+            val matches = ((root["results"] as? JsonObject)?.get("albummatches") as? JsonObject)?.get("album")
+            return items(matches).mapNotNull { a ->
+                val title = a.str("name") ?: return@mapNotNull null
+                val artist = a.artistName() ?: return@mapNotNull null
+                val image = (a["image"] as? JsonArray)
+                    ?.mapNotNull { (it as? JsonObject)?.str("#text") }
+                    ?.lastOrNull { it.isNotBlank() }
+                    ?.takeUnless { it.contains(PLACEHOLDER_IMAGE) }
+                Album(artist, title, 0, image, mbid = a.str("mbid")?.ifBlank { null }, lastfmUrl = a.str("url"))
+            }
         }
 
         // Last.fm's stand-in when it has no cover: a grey star. Better to draw our own sleeve.

@@ -47,6 +47,20 @@ class LastFmChartsTest {
         assertEquals(listOf("Foreign Spies", "Zero Sum"), info.tracks)
     }
 
+    @Test
+    fun readsAlbumSearch() {
+        val root = LastFm.parseRoot(
+            """{"results":{"albummatches":{"album":[
+                {"name":"Cutouts","artist":"The Smile","url":"https://www.last.fm/x","image":[{"size":"large","#text":"https://img/l.png"}],"mbid":""},
+                {"name":"No artist"}]}}}"""
+        )
+        val found = LastFm.parseAlbumSearch(root)
+        assertEquals(1, found.size)
+        assertEquals("The Smile", found[0].artist)
+        assertEquals("https://img/l.png", found[0].imageUrl)
+        assertNull(found[0].mbid)
+    }
+
     @Test(expected = IOException::class)
     fun errorsCarryLastFmsMessage() {
         LastFm.parseRoot("""{"error":6,"message":"User not found"}""")

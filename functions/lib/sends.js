@@ -86,6 +86,8 @@ function cleanBooklet(raw) {
     closing: str(set.closing, 6000),
     yearList: set.yearList === true,
     playlistUrl: httpsUrl(set.playlistUrl),
+    kind: set.kind === "monthly" ? "monthly" : "group",
+    month: typeof set.month === "string" && /^\d{4}-\d{2}$/.test(set.month) ? set.month : null,
   };
 }
 
@@ -125,6 +127,10 @@ function pairId(a, b) {
 /** The push notification for a delivered send. */
 function notification(fromName, booklet) {
   const from = fromName || "Someone";
+  if (booklet.kind === "monthly" && booklet.entries.length) {
+    const a = booklet.entries[0].album;
+    return { title: `${from} sent you an album`, body: `${a.artist} — ${a.title}, with a note. Open Liner Notes to read it.` };
+  }
   const n = booklet.entries.length;
   return {
     title: `${from} sent you ${booklet.title}`,

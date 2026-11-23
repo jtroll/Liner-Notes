@@ -19,8 +19,35 @@ data class SendInfo(
     /** False until the recipient accepts the invite the set was scheduled against. */
     val recipientJoined: Boolean,
     val test: Boolean,
+    val pairId: String? = null,
+    /** "group" or "monthly". */
+    val kind: String = "group",
+    val month: String? = null,
+    val fromName: String = "",
+    /** The copy the recipient sees. */
+    val set: GroupSet? = null,
+    /** The recipient's reactions, by album position. */
+    val reactions: Map<Int, Reaction> = emptyMap(),
 ) {
     val delivered: Boolean get() = status == "delivered"
+
+    /** This send as the recipient sees it, for the sender to look back at. */
+    fun asReceived(): Received? = set?.let {
+        Received(id, fromName, deliveredAt ?: deliverAt, it, test, pairId, kind, reactions, mine = true)
+    }
+}
+
+/** The recipient's reaction to one album: "loved", "liked" or "notForMe", and a comment. */
+@Immutable
+data class Reaction(val reaction: String?, val comment: String) {
+    val label: String get() = reactionLabel(reaction)
+}
+
+fun reactionLabel(reaction: String?): String = when (reaction) {
+    "loved" -> "Loved"
+    "liked" -> "Liked"
+    "notForMe" -> "Not for me"
+    else -> ""
 }
 
 /** A set that has arrived in the signed-in person's inbox. */
@@ -33,7 +60,15 @@ data class Received(
     val set: GroupSet,
     /** A copy the sender sent themselves to check it. */
     val test: Boolean,
-)
+    val pairId: String? = null,
+    /** "group" or "monthly". */
+    val kind: String = "group",
+    val reactions: Map<Int, Reaction> = emptyMap(),
+    /** True when it's one of the signed-in person's own sends, seen as the recipient sees it. */
+    val mine: Boolean = false,
+) {
+    val isMonthly: Boolean get() = kind == "monthly"
+}
 
 /** An invite link the sender has made for a set. */
 data class Invite(val token: String, val url: String)
@@ -74,8 +109,11 @@ fun GroupSet.forRecipient(): GroupSet = copy(
     inviteToken = null,
     inviteUrl = null,
     scheduledVersion = null,
+    picks = emptyList(),
+    stretch = false,
+    parked = emptyList(),
     entries = entries.map {
-        it.copy(aiDraft = "", flags = emptyList(), sources = emptyList(), album = it.album.copy(plays = 0, weeks = 0))
+        it.copy(aiDraft = "", flags = emptyList(), sources = emptyList(), connection = "", album = it.album.copy(plays = 0, weeks = 0))
     },
 )
 

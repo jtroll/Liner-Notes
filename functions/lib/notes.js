@@ -149,7 +149,8 @@ function factsBlock(facts) {
  *   artist, album, senderName, recipientName, taste, plays, weeks, rangeLabel, year,
  *   favoriteTracks [string], earlierLists [{year, artistOnly}], isCloser, isMonthly,
  *   style {examples, toneNotes, minWords, maxWords}, facts (from facts.gather),
- *   instruction (re-draft request), previous (the note being re-drafted)
+ *   instruction (re-draft request), previous (the note being re-drafted),
+ *   connection (monthly picks: how the album ties to what the recipient loves)
  */
 function draftPrompt(input) {
   const [min, max] = wordRange(input.style);
@@ -180,6 +181,7 @@ function draftPrompt(input) {
     context.push(e.artistOnly ? `${input.artist} was on ${sender}'s ${e.year} list with a different album.` : `This album was on ${sender}'s ${e.year} list.`);
   }
   if (input.taste) context.push(`What ${recipient} likes, in ${sender}'s words: ${input.taste}`);
+  if (input.connection) context.push(`How it connects to what ${recipient} already loves: ${input.connection}`);
 
   let user =
     examplesBlock(input.style) +
@@ -307,6 +309,23 @@ async function draftFrame(apiKey, input) {
   return { note };
 }
 
+/**
+ * The monthly suggestion: one album and two alternates from the sender's candidates
+ * (lib/monthly.js builds the prompt and checks the ids). Retries once if no valid id came back.
+ */
+async function suggestMonthly(apiKey, input) {
+  const monthly = require("./monthly");
+  const client = new Anthropic({ apiKey });
+  const prompt = monthly.suggestPrompt(input);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const user = attempt === 0 ? prompt.user : `${prompt.user}\n\nUse only ids from the candidate list above.`;
+    const response = await askOpus(client, { system: prompt.system, user, effort: "medium", maxTokens: 8000 });
+    const picks = monthly.parseSuggestions(textOf(response), input.candidates);
+    if (picks.length) return picks;
+  }
+  throw new NoteError("Claude didn't pick from the candidates. Try again.", "empty");
+}
+
 async function fitScores(apiKey, input) {
   const client = new Anthropic({ apiKey });
   const response = await askHaiku(client, { ...fitPrompt(input), effort: "low" });
@@ -318,6 +337,7 @@ module.exports = {
   draftNote,
   draftFrame,
   fitScores,
+  suggestMonthly,
   // pure parts, for tests
   draftPrompt,
   parseDraft,

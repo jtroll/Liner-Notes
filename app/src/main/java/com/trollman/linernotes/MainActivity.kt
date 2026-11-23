@@ -53,6 +53,10 @@ class MainActivity : ComponentActivity() {
             vm.openSend(id)
             intent.removeExtra(PushService.EXTRA_SEND_ID)
         }
+        intent.getStringExtra(PushService.EXTRA_PAIR_ID)?.let { id ->
+            vm.openPair(id)
+            intent.removeExtra(PushService.EXTRA_PAIR_ID)
+        }
         val data = intent.data ?: return
         if (data.scheme != "linernotes") return
         when (data.host) {

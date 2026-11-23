@@ -16,6 +16,9 @@ import androidx.core.content.ContextCompat
 import com.trollman.linernotes.InvitePrompt
 import com.trollman.linernotes.ui.screens.inbox.InboxScreen
 import com.trollman.linernotes.ui.screens.inbox.ReceivedScreen
+import com.trollman.linernotes.ui.screens.pairs.MonthlyScreen
+import com.trollman.linernotes.ui.screens.pairs.PairScreen
+import com.trollman.linernotes.ui.screens.pairs.PairsScreen
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -62,17 +65,23 @@ private sealed interface Place {
     data object Settings : Place
     data object Sets : Place
     data class SetOpen(val id: String) : Place
-    data class Note(val setId: String, val key: String) : Place
+    data class Note(val setId: String, val key: String, val monthlyPair: String? = null) : Place
     data object Writing : Place
     data object Inbox : Place
-    data class Received(val id: String) : Place
+    /** A send in your inbox, or one of your own; [pairId] when opened from a pair's page. */
+    data class Received(val id: String, val pairId: String? = null) : Place
+    data object Pairs : Place
+    data class Pair(val id: String) : Place
+    data class Monthly(val setId: String, val pairId: String) : Place
 }
 
 /** Where Back goes from each place. */
 private fun Place.up(): Place = when (this) {
-    is Place.Note -> Place.SetOpen(setId)
+    is Place.Note -> if (monthlyPair != null) Place.Monthly(setId, monthlyPair) else Place.SetOpen(setId)
     is Place.SetOpen, Place.Writing -> Place.Sets
-    is Place.Received -> Place.Inbox
+    is Place.Received -> if (pairId != null) Place.Pair(pairId) else Place.Inbox
+    is Place.Monthly -> Place.Pair(pairId)
+    is Place.Pair -> Place.Pairs
     else -> Place.Shelf
 }
 
@@ -123,7 +132,11 @@ fun AppRoot(vm: AppViewModel, onConnectSpotify: () -> Unit) {
     LaunchedEffect(ui.goTo, gate) {
         val target = ui.goTo ?: return@LaunchedEffect
         if (gate != Gate.Shelf) return@LaunchedEffect
-        place = if (target.startsWith("send:")) Place.Received(target.removePrefix("send:")) else Place.Inbox
+        place = when {
+            target.startsWith("send:") -> Place.Received(target.removePrefix("send:"))
+            target.startsWith("pair:") -> Place.Pair(target.removePrefix("pair:"))
+            else -> Place.Inbox
+        }
         vm.consumeGoTo()
     }
     BackHandler(enabled = gate == Gate.Shelf && place != Place.Shelf) { place = place.up() }
@@ -153,6 +166,7 @@ fun AppRoot(vm: AppViewModel, onConnectSpotify: () -> Unit) {
                                 onGroupSend = { place = Place.Sets },
                                 onInbox = { place = Place.Inbox },
                                 inboxCount = groupState.inbox.size,
+                                onPairs = { place = Place.Pairs },
                             )
                             is Place.AlbumOpen -> AlbumScreen(
                                 album = p.album,
@@ -205,10 +219,10 @@ fun AppRoot(vm: AppViewModel, onConnectSpotify: () -> Unit) {
                                         entry = entry,
                                         state = groupState,
                                         vm = group,
-                                        onBack = { place = Place.SetOpen(set.id) },
+                                        onBack = { place = p.up() },
                                         onPlay = { album -> vm.play(context.findActivity(), album) },
                                         onOpenLink = openLink,
-                                        onGo = { key -> place = Place.Note(set.id, key) },
+                                        onGo = { key -> place = Place.Note(set.id, key, p.monthlyPair) },
                                     )
                                 }
                             }
@@ -224,6 +238,7 @@ fun AppRoot(vm: AppViewModel, onConnectSpotify: () -> Unit) {
                             }
                             is Place.Received -> {
                                 val received = groupState.inbox.firstOrNull { it.id == p.id }
+                                    ?: groupState.sendsById[p.id]?.asReceived()
                                 if (received == null) {
                                     // Not arrived on this phone yet (or gone): the inbox shows what's here.
                                     InboxScreen(
@@ -236,10 +251,53 @@ fun AppRoot(vm: AppViewModel, onConnectSpotify: () -> Unit) {
                                 } else {
                                     ReceivedScreen(
                                         received = received,
-                                        onBack = { place = Place.Inbox },
+                                        onBack = { place = p.up() },
                                         onPlay = { a -> vm.play(context.findActivity(), a.toAlbum(), a.spotifyUri) },
                                         onOpenInSpotify = { a -> vm.openInSpotify(context, a.toAlbum(), a.spotifyUri) },
                                         onOpenLink = openLink,
+                                        onReact = { i, r, comment -> group.react(received.id, i, r, comment) },
+                                        busy = groupState.busy,
+                                        backLabel = if (p.pairId != null) "Back to the pair" else "Back to your inbox",
+                                    )
+                                }
+                            }
+                            Place.Pairs -> {
+                                LaunchedEffect(Unit) { askNotifications() }
+                                PairsScreen(
+                                    state = groupState,
+                                    onBack = { place = Place.Shelf },
+                                    onOpen = { id -> place = Place.Pair(id) },
+                                    vm = group,
+                                )
+                            }
+                            is Place.Pair -> {
+                                val pair = groupState.pairs.firstOrNull { it.id == p.id }
+                                if (pair == null) {
+                                    if (groupState.pairsReady) LaunchedEffect(Unit) { place = Place.Pairs }
+                                } else {
+                                    PairScreen(
+                                        pair = pair,
+                                        state = groupState,
+                                        vm = group,
+                                        onBack = { place = Place.Pairs },
+                                        onCompose = { place = Place.Monthly(group.openMonthly(pair), pair.id) },
+                                        onOpenSend = { r -> place = Place.Received(r.id, pair.id) },
+                                    )
+                                }
+                            }
+                            is Place.Monthly -> {
+                                val set = groupState.sets.firstOrNull { it.id == p.setId }
+                                if (set == null) {
+                                    LaunchedEffect(Unit) { place = Place.Pair(p.pairId) }
+                                } else {
+                                    MonthlyScreen(
+                                        set = set,
+                                        pair = groupState.pairs.firstOrNull { it.id == p.pairId },
+                                        state = groupState,
+                                        vm = group,
+                                        onBack = { place = Place.Pair(p.pairId) },
+                                        onOpenNote = { key -> place = Place.Note(set.id, key, p.pairId) },
+                                        onPlay = { album -> vm.play(context.findActivity(), album) },
                                     )
                                 }
                             }

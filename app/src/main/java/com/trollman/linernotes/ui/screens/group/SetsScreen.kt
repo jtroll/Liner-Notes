@@ -74,7 +74,7 @@ fun SetsScreen(
 ) {
     val c = liner
     val insets = WindowInsets.safeDrawing.asPaddingValues()
-    var creating by rememberSaveable { mutableStateOf(state.ready && state.sets.isEmpty()) }
+    var creating by rememberSaveable { mutableStateOf(state.ready && state.groupSets.isEmpty()) }
 
     LazyColumn(
         Modifier.fillMaxSize(),
@@ -95,7 +95,7 @@ fun SetsScreen(
         item {
             DisplayWindow {
                 Text("SETS", style = mono(11.sp), color = c.onDisplay.copy(alpha = 0.6f))
-                DotMatrixText(state.sets.size.toString().padStart(2, '0'), size = 56.sp, color = c.onDisplay, maxLines = 1)
+                DotMatrixText(state.groupSets.size.toString().padStart(2, '0'), size = 56.sp, color = c.onDisplay, maxLines = 1)
                 Text(
                     "A STACK OF RECORDS, A NOTE ON EACH",
                     style = mono(11.sp),
@@ -131,8 +131,8 @@ fun SetsScreen(
                 }
             }
         }
-        if (state.sets.isNotEmpty()) item { SectionLabel("Your sets") }
-        items(state.sets, key = { it.id }) { set -> SetRow(set, onClick = { onOpen(set.id) }) }
+        if (state.groupSets.isNotEmpty()) item { SectionLabel("Your sets") }
+        items(state.groupSets, key = { it.id }) { set -> SetRow(set, onClick = { onOpen(set.id) }) }
     }
 }
 

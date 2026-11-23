@@ -71,6 +71,7 @@ fun ShelfScreen(
     onGroupSend: () -> Unit,
     onInbox: () -> Unit,
     inboxCount: Int,
+    onPairs: () -> Unit,
 ) {
     val c = liner
     val shelf = ui.shelf
@@ -95,12 +96,19 @@ fun ShelfScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("LINER NOTES", style = mono(13.sp), color = c.ink, modifier = Modifier.weight(1f))
                         PhysicalButton(
+                            onPairs,
+                            Modifier.height(44.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            contentDescription = "Monthly send: an album each way with your pairs",
+                        ) { Text("MONTHLY", style = mono(12.sp), modifier = Modifier.padding(horizontal = 12.dp)) }
+                        Spacer(Modifier.width(8.dp))
+                        PhysicalButton(
                             onGroupSend,
                             Modifier.height(44.dp),
                             shape = RoundedCornerShape(12.dp),
                             contentDescription = "Group send: a set of albums with a note on each",
-                        ) { Text("GROUP SEND", style = mono(12.sp), modifier = Modifier.padding(horizontal = 14.dp)) }
-                        Spacer(Modifier.width(10.dp))
+                        ) { Text("GROUP", style = mono(12.sp), modifier = Modifier.padding(horizontal = 12.dp)) }
+                        Spacer(Modifier.width(8.dp))
                         PhysicalButton(
                             onInbox,
                             Modifier.size(44.dp),
