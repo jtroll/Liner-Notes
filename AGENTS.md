@@ -34,6 +34,18 @@ stays out of this repository while the repository is public.
   their builders pure so `functions/test/notes.test.js` covers them.
 - The app reads Last.fm's weekly charts itself for the group-send shortlist and favorite tracks
   (`LastFm.rangeCharts`, ranked in `data/Ranking.kt`).
+- Sending (`functions/index.js`, "Sending"; pure parts in `functions/lib/sends.js`): a set goes out
+  against an invite (`invites/{token}`). `scheduleSend` stores the recipient's copy of the booklet
+  in `sends/{uid_setId}`, cut down by `cleanBooklet` (and first by `GroupSet.forRecipient()` in
+  the app) so the sender's taste notes, Claude's drafts, flags, sources and play counts never
+  leave their account. `acceptInvite` forms `pairs/{uid_uid}` and delivers anything already due;
+  `deliverDueSends` runs every 15 minutes for the rest. Only Functions write invites, pairs and
+  sends; a recipient can read a send only once it's delivered. Push goes to `users/{uid}.fcmTokens`.
+- Invite links are `https://<project>.web.app/invite/<token>` (`hosting/invite`), which hands
+  over to `linernotes://invite/<token>`; the app keeps the token through sign-in (`Prefs`) and asks
+  "Join?" before accepting.
+- The printable booklet is drawn on the phone (`print/BookletPdf.kt`): half-letter pages, or two
+  to a letter sheet in fold order (`print/Imposition.kt`).
 
 ## Design system
 

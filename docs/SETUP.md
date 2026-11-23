@@ -42,7 +42,8 @@ Repo > Settings > Secrets and variables > Actions.
 - `FIREBASE_SERVICE_ACCOUNT`: the JSON key of a Google Cloud service account for CI.
   Google Cloud console > IAM & Admin > Service accounts > create `ci-deploy` with these roles:
   Firebase Admin, Firebase App Distribution Admin, Cloud Functions Admin, Service Account User,
-  Secret Manager Admin, Service Usage Admin, Cloud Build Editor, Artifact Registry Administrator.
+  Secret Manager Admin, Service Usage Admin, Cloud Build Editor, Artifact Registry Administrator,
+  Cloud Scheduler Admin (for the delivery job).
   Keys > Add key > JSON, and paste the whole file as the secret's value.
 
 **Variables**
@@ -90,11 +91,16 @@ others.) The deploy fails until all three exist, because the Functions name them
 ## 6. Deploy and install
 
 1. Merge the open pull request into `main` (or re-run the **Backend** workflow on main). It
-   deploys the Functions, the Firestore rules and the Last.fm callback page.
+   deploys the Functions (including the 15-minute delivery job, which turns on Cloud Scheduler),
+   the Firestore rules and indexes, and the Last.fm callback and invite pages.
 2. On the phone: accept the App Distribution email invite and install **Firebase App Tester**.
    Each push to any branch then arrives there as an update.
 3. Open Liner Notes, sign in with Google, connect Last.fm and Spotify, open an album and press
    play.
+4. To try sending: in a set's Booklet tab, press **Send a test copy to my inbox**, then open
+   Inbox on the Shelf. For the real thing, the person you invite needs the app too: add them as a
+   tester in App Distribution (and under Spotify's User Management if they'll play in the app),
+   then share the invite link from the set.
 
 ## If something fails
 

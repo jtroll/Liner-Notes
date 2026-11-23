@@ -14,6 +14,8 @@ import androidx.lifecycle.viewModelScope
 import com.google.firebase.functions.FirebaseFunctionsException
 import com.trollman.linernotes.data.Album
 import com.trollman.linernotes.data.DemoAlbums
+import com.trollman.linernotes.data.InviteInfo
+import com.trollman.linernotes.data.InviteLinks
 import com.trollman.linernotes.data.Period
 import com.trollman.linernotes.data.Profile
 import com.trollman.linernotes.data.SpotifyAlbum
@@ -23,6 +25,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
@@ -59,7 +62,15 @@ data class UiState(
     val message: String? = null,
     /** True after "Look around" on a build without Firebase. */
     val browsingDemo: Boolean = false,
+    /** An invite link waiting for the person to say Join. */
+    val invite: InvitePrompt? = null,
+    /** Somewhere the screens should go next: "inbox" or "send:<id>". */
+    val goTo: String? = null,
 )
+
+/** The "Join?" question for an opened invite link. [info] is null while it loads. */
+@Immutable
+data class InvitePrompt(val token: String, val info: InviteInfo? = null, val error: String? = null)
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -103,6 +114,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
             viewModelScope.launch {
                 graph.prefs.connectionsSeen.collect { recomputeGate() }
+            }
+            // Once signed in: register this phone for "a set has arrived", and offer any invite
+            // link that was opened before signing in.
+            viewModelScope.launch {
+                ui.map { it.account?.uid }.distinctUntilChanged().collect { uid ->
+                    if (uid != null) {
+                        runCatching { graph.cloud?.registerPush(uid) }
+                            .onFailure { Log.w("AppViewModel", "Push registration failed", it) }
+                    }
+                }
+            }
+            viewModelScope.launch {
+                combine(graph.prefs.pendingInvite, ui.map { it.account?.uid }.distinctUntilChanged()) { token, uid ->
+                    if (uid == null) null else token
+                }.distinctUntilChanged().collect { token -> if (token != null) loadInvite(token) }
             }
         }
     }
@@ -155,6 +181,80 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun finishConnections() {
         viewModelScope.launch { graph.prefs.setConnectionsSeen(true) }
     }
+
+    // ---- Invites and the inbox -----------------------------------------------------------------
+
+    /** An invite link was opened (MainActivity) or pasted. Offered once the person is signed in. */
+    fun receiveInvite(token: String) {
+        viewModelScope.launch { graph.prefs.setPendingInvite(token) }
+    }
+
+    /** "Join with an invite": a pasted link or code. */
+    fun joinWithLink(text: String) {
+        val token = InviteLinks.token(text)
+        if (token == null) {
+            say("That doesn't look like an invite link. Copy the whole link and try again.")
+            return
+        }
+        if (graph.cloud == null) {
+            say("Joining needs the backend (docs/SETUP.md).")
+            return
+        }
+        receiveInvite(token)
+        // The same link pasted twice: the collector won't fire again, so load it here.
+        if (_ui.value.invite?.token != token && _ui.value.account != null) loadInvite(token)
+    }
+
+    private fun loadInvite(token: String) {
+        val cloud = graph.cloud ?: return
+        _ui.update { it.copy(invite = InvitePrompt(token)) }
+        viewModelScope.launch {
+            runCatching { cloud.inviteInfo(token) }
+                .onSuccess { info ->
+                    if (info.alreadyJoined) {
+                        graph.prefs.setPendingInvite(null)
+                        _ui.update { it.copy(invite = null, goTo = "inbox") }
+                    } else {
+                        _ui.update { it.copy(invite = InvitePrompt(token, info)) }
+                    }
+                }
+                .onFailure { e -> _ui.update { it.copy(invite = InvitePrompt(token, error = describe(e))) } }
+        }
+    }
+
+    fun acceptInvite() {
+        val prompt = _ui.value.invite ?: return
+        val cloud = graph.cloud ?: return
+        viewModelScope.launch {
+            busy("invite", true)
+            try {
+                val (inviter, delivered) = cloud.acceptInvite(prompt.token, _ui.value.account?.name.orEmpty())
+                graph.prefs.setPendingInvite(null)
+                val who = inviter.ifBlank { "them" }
+                _ui.update {
+                    it.copy(
+                        invite = null,
+                        goTo = "inbox",
+                        message = if (delivered > 0) "You're in. $who's set is waiting for you." else "You're in. Sets from $who will arrive in your inbox.",
+                    )
+                }
+            } catch (e: Exception) {
+                _ui.update { it.copy(invite = prompt.copy(error = describe(e))) }
+            } finally {
+                busy("invite", false)
+            }
+        }
+    }
+
+    fun dismissInvite() {
+        _ui.update { it.copy(invite = null) }
+        viewModelScope.launch { graph.prefs.setPendingInvite(null) }
+    }
+
+    /** A "set has arrived" notification was tapped. */
+    fun openSend(sendId: String) = _ui.update { it.copy(goTo = "send:$sendId") }
+
+    fun consumeGoTo() = _ui.update { it.copy(goTo = null) }
 
     // ---- Last.fm --------------------------------------------------------------------------------
 
@@ -259,6 +359,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             .getOrNull()
         matches[album.key] = found
         return found
+    }
+
+    /** Plays a received album whose Spotify release the sender already matched. */
+    fun play(activity: Activity, album: Album, spotifyUri: String?) {
+        if (spotifyUri == null || !setup.canPlay) return play(activity, album)
+        graph.player.play(activity, spotifyUri)
+    }
+
+    /** Opens a received album in the Spotify app, using the sender's match when there is one. */
+    fun openInSpotify(context: Context, album: Album, spotifyUri: String?) {
+        if (spotifyUri == null) return openInSpotify(context, album)
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(spotifyUri)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (e: ActivityNotFoundException) {
+            val web = "https://open.spotify.com/album/" + spotifyUri.substringAfterLast(':')
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(web)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
     }
 
     /** Plays [album] in the app through the Spotify app, or opens Spotify's search as a fallback. */

@@ -3,15 +3,26 @@ package com.trollman.linernotes.cloud
 import com.google.android.gms.tasks.Task
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.functions.FirebaseFunctions
+import com.google.firebase.messaging.FirebaseMessaging
+import android.util.Log
 import com.trollman.linernotes.data.Fit
+import com.trollman.linernotes.data.GroupSet
+import com.trollman.linernotes.data.Invite
+import com.trollman.linernotes.data.InviteInfo
 import com.trollman.linernotes.data.Profile
+import com.trollman.linernotes.data.Received
+import com.trollman.linernotes.data.Scheduled
+import com.trollman.linernotes.data.SendInfo
+import com.trollman.linernotes.data.storeJson
 import com.trollman.linernotes.data.Source
 import com.trollman.linernotes.data.SpotifyAlbum
 import com.trollman.linernotes.data.Writing
 import java.util.concurrent.TimeUnit
+import kotlinx.serialization.decodeFromString
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -148,6 +159,117 @@ class Cloud {
     suspend fun makeTestPlaylist(albumUri: String): String =
         call("spotifyTestPlaylist", mapOf("albumUri" to albumUri))["url"] as? String ?: ""
 
+    // ---- Sending (functions/index.js, "Sending") ---------------------------------------------
+
+    /** Makes an invite link for the person a set is for. */
+    suspend fun createInvite(forName: String, fromName: String): Invite {
+        val r = call("createInvite", mapOf("forName" to forName, "fromName" to fromName))
+        return Invite(token = r["token"] as? String ?: "", url = r["url"] as? String ?: "")
+    }
+
+    /** Who an invite is from, without joining. */
+    suspend fun inviteInfo(token: String): InviteInfo {
+        val r = call("inviteInfo", mapOf("token" to token))
+        return InviteInfo(
+            inviterName = r["inviterName"] as? String ?: "",
+            forName = r["forName"] as? String ?: "",
+            problem = r["problem"] as? String,
+            alreadyJoined = r["alreadyJoined"] as? Boolean ?: false,
+        )
+    }
+
+    /** Joins: forms the pair and receives anything already due. Returns (inviter's name, sets delivered). */
+    suspend fun acceptInvite(token: String, name: String): Pair<String, Int> {
+        val r = call("acceptInvite", mapOf("token" to token, "name" to name))
+        return (r["inviterName"] as? String ?: "") to ((r["delivered"] as? Number)?.toInt() ?: 0)
+    }
+
+    /**
+     * Schedules [bookletJson] (the recipient's copy of the set) for [deliverAt] against the invite,
+     * or, with [test], delivers it to the sender's own inbox now.
+     */
+    suspend fun scheduleSend(
+        setId: String,
+        bookletJson: String,
+        deliverAt: Long,
+        inviteToken: String?,
+        fromName: String,
+        test: Boolean,
+    ): Scheduled {
+        val r = call(
+            "scheduleSend",
+            mapOf(
+                "setId" to setId, "booklet" to bookletJson, "deliverAt" to deliverAt,
+                "inviteToken" to inviteToken, "fromName" to fromName, "test" to test,
+            ),
+        )
+        return Scheduled(
+            status = r["status"] as? String ?: "scheduled",
+            deliverAt = (r["deliverAt"] as? Number)?.toLong() ?: deliverAt,
+            waitingForJoin = r["waitingForJoin"] as? Boolean ?: false,
+        )
+    }
+
+    suspend fun cancelSend(setId: String) {
+        call("cancelSend", mapOf("setId" to setId))
+    }
+
+    /** The sets this person has scheduled or delivered, live. */
+    fun sendsFrom(uid: String): Flow<List<SendInfo>> = callbackFlow {
+        val reg = db.collection("sends").whereEqualTo("senderUid", uid).addSnapshotListener { snap, err ->
+            if (err != null) Log.w(TAG, "Watching sends failed", err)
+            if (snap == null) return@addSnapshotListener
+            trySend(
+                snap.documents.mapNotNull { d ->
+                    SendInfo(
+                        id = d.id,
+                        setId = d.getString("setId") ?: return@mapNotNull null,
+                        status = d.getString("status") ?: "scheduled",
+                        deliverAt = d.getTimestamp("deliverAt")?.toDate()?.time ?: 0L,
+                        deliveredAt = d.getTimestamp("deliveredAt")?.toDate()?.time,
+                        recipientJoined = d.getString("recipientUid") != null,
+                        test = d.getBoolean("test") ?: false,
+                    )
+                }
+            )
+        }
+        awaitClose { reg.remove() }
+    }
+
+    /** Sets delivered to this person, newest first, live. */
+    fun inbox(uid: String): Flow<List<Received>> = callbackFlow {
+        val reg = db.collection("sends")
+            .whereEqualTo("recipientUid", uid)
+            .whereEqualTo("status", "delivered")
+            .addSnapshotListener { snap, err ->
+                if (err != null) Log.w(TAG, "Watching the inbox failed", err)
+                if (snap == null) return@addSnapshotListener
+                trySend(
+                    snap.documents.mapNotNull { d ->
+                        val json = d.getString("booklet") ?: return@mapNotNull null
+                        val set = runCatching { storeJson.decodeFromString<GroupSet>(json) }
+                            .onFailure { Log.w(TAG, "Unreadable booklet ${d.id}", it) }
+                            .getOrNull() ?: return@mapNotNull null
+                        Received(
+                            id = d.id,
+                            fromName = d.getString("fromName") ?: "",
+                            deliveredAt = d.getTimestamp("deliveredAt")?.toDate()?.time
+                                ?: d.getTimestamp("deliverAt")?.toDate()?.time ?: 0L,
+                            set = set,
+                            test = d.getBoolean("test") ?: false,
+                        )
+                    }.sortedByDescending { it.deliveredAt }
+                )
+            }
+        awaitClose { reg.remove() }
+    }
+
+    /** Saves this phone's push token on the user document, so delivered sets can ping it. */
+    suspend fun registerPush(uid: String) {
+        val token = FirebaseMessaging.getInstance().token.await()
+        saveToken(uid, token)
+    }
+
     /** Keeps the signed-in person's name on their user document. Best effort. */
     fun touchUser(name: String?) {
         val uid = FirebaseAuth.getInstance().currentUser?.uid ?: return
@@ -169,6 +291,14 @@ class Cloud {
         }
         awaitClose { reg.remove() }
     }
+}
+
+private const val TAG = "Cloud"
+
+/** Adds a push token to the person's user document (PushService calls this for new tokens). */
+fun saveToken(uid: String, token: String) {
+    FirebaseFirestore.getInstance().collection("users").document(uid)
+        .set(mapOf("fcmTokens" to FieldValue.arrayUnion(token)), SetOptions.merge())
 }
 
 /** Awaits a Play-services Task without pulling in another coroutines artifact (as Kerasma). */

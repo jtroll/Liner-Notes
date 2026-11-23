@@ -11,18 +11,30 @@
 //   users/{uid}/private/tokens  Last.fm session key, Spotify refresh token. No client can read it.
 //   users/{uid}/sets/{setId}    a group send, as {json, updatedAt} (the app owns these)
 //   users/{uid}/settings/{doc}  "writing": style examples, tone notes, last year's frame notes
+//   users/{uid}.fcmTokens       the phone's push tokens (the app adds them; these Functions prune)
+//   invites/{token}             inviterUid, inviterName, forName, status (open, accepted),
+//                               expiresAt, acceptedBy, pairId. Only these Functions read them.
+//   pairs/{uid1_uid2}           members [uid, uid], names {uid: name}, createdAt
+//   sends/{uid_setId[_test]}    one scheduled or delivered set: senderUid, fromName, recipientUid
+//                               (null until the invite is accepted), inviteToken, pairId, status
+//                               (scheduled, delivered), deliverAt, deliveredAt, booklet (the
+//                               recipient's copy, as JSON). The sender reads their own; the
+//                               recipient reads it only once delivered. Only these Functions write.
 
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { setGlobalOptions } = require("firebase-functions/v2");
 const { defineSecret, defineString } = require("firebase-functions/params");
 const logger = require("firebase-functions/logger");
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestore");
+const { getMessaging } = require("firebase-admin/messaging");
 
 const lastfm = require("./lib/lastfm");
 const spotify = require("./lib/spotify");
 const facts = require("./lib/facts");
 const notes = require("./lib/notes");
+const sends = require("./lib/sends");
 const Anthropic = require("@anthropic-ai/sdk");
 
 initializeApp();
@@ -294,4 +306,251 @@ exports.scoreFit = onCall({ secrets: [ANTHROPIC_API_KEY], timeoutSeconds: 120 },
   } catch (err) {
     throw toHttpsError("scoreFit", err);
   }
+});
+
+// ---- Sending ------------------------------------------------------------------------------
+//
+// A set goes to someone through an invite: the sender makes a link, schedules the set against it,
+// and shares the link whenever they like (on the day itself, if it's a present). Accepting the
+// invite forms the pair and hands over any set whose delivery time has already come; the rest go
+// out from deliverDueSends at their time.
+
+const inviteDoc = (token) => db.collection("invites").doc(token);
+const sendDoc = (id) => db.collection("sends").doc(id);
+
+function hostingBase() {
+  const project = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT || "";
+  return project ? `https://${project}.web.app` : "";
+}
+
+async function displayName(uid, fallback) {
+  const snap = await userDoc(uid).get();
+  const name = snap.exists ? snap.get("name") : null;
+  return (typeof name === "string" && name.trim()) || fallback || "";
+}
+
+/** Pushes the "you've got a set" notification to the recipient's phones. Never throws. */
+async function notifyDelivered(sendId, data) {
+  try {
+    const user = await userDoc(data.recipientUid).get();
+    const tokens = (user.exists && user.get("fcmTokens")) || [];
+    if (!Array.isArray(tokens) || !tokens.length) return;
+    const booklet = JSON.parse(data.booklet);
+    const n = sends.notification(data.fromName, booklet);
+    const result = await getMessaging().sendEachForMulticast({
+      tokens: tokens.slice(0, 20),
+      notification: n,
+      data: { sendId },
+      android: { priority: "high", notification: { channelId: "sends" } },
+    });
+    const dead = [];
+    result.responses.forEach((r, i) => {
+      const code = r.error && r.error.code;
+      if (code === "messaging/registration-token-not-registered" || code === "messaging/invalid-registration-token") {
+        dead.push(tokens[i]);
+      }
+    });
+    if (dead.length) await userDoc(data.recipientUid).update({ fcmTokens: FieldValue.arrayRemove(...dead) });
+  } catch (err) {
+    logger.warn("notifyDelivered failed", { sendId, message: err.message });
+  }
+}
+
+/** Marks a send delivered (if it still needs it) and notifies the recipient. */
+async function deliver(ref) {
+  const delivered = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return null;
+    const d = snap.data();
+    const due = sends.isDue({ status: d.status, recipientUid: d.recipientUid, deliverAtMs: d.deliverAt.toMillis() }, Date.now());
+    if (!due) return null;
+    tx.update(ref, { status: "delivered", deliveredAt: FieldValue.serverTimestamp() });
+    return d;
+  });
+  if (delivered) await notifyDelivered(ref.id, delivered);
+  return !!delivered;
+}
+
+exports.createInvite = onCall(async (request) => {
+  const uid = requireUid(request);
+  const d = request.data || {};
+  const forName = optString(d, "forName", 80);
+  const inviterName = optString(d, "fromName", 80) || (await displayName(uid, request.auth.token.name));
+  const token = sends.newToken();
+  await inviteDoc(token).set({
+    inviterUid: uid,
+    inviterName,
+    forName,
+    status: "open",
+    createdAt: FieldValue.serverTimestamp(),
+    expiresAt: Timestamp.fromMillis(Date.now() + sends.INVITE_DAYS * 86_400_000),
+  });
+  const base = hostingBase();
+  return { token, url: base ? `${base}/invite/${token}` : `linernotes://invite/${token}` };
+});
+
+// Who an invite is from, so the app can ask "Join?" before anything happens.
+exports.inviteInfo = onCall(async (request) => {
+  const uid = requireUid(request);
+  const token = request.data && request.data.token;
+  if (!sends.isToken(token)) throw new HttpsError("invalid-argument", "That isn't an invite link.");
+  const snap = await inviteDoc(token).get();
+  const invite = snap.exists ? snap.data() : null;
+  const problem = sends.inviteProblem(
+    invite && { ...invite, expiresAtMs: invite.expiresAt ? invite.expiresAt.toMillis() : 0 },
+    uid,
+    Date.now(),
+  );
+  return {
+    inviterName: (invite && invite.inviterName) || "",
+    forName: (invite && invite.forName) || "",
+    problem,
+    alreadyJoined: !!invite && invite.status === "accepted" && invite.acceptedBy === uid,
+  };
+});
+
+exports.acceptInvite = onCall(async (request) => {
+  const uid = requireUid(request);
+  const token = request.data && request.data.token;
+  if (!sends.isToken(token)) throw new HttpsError("invalid-argument", "That isn't an invite link.");
+  const myName = optString(request.data, "name", 80) || (await displayName(uid, request.auth.token.name));
+  const result = await db.runTransaction(async (tx) => {
+    const ref = inviteDoc(token);
+    const snap = await tx.get(ref);
+    const invite = snap.exists ? snap.data() : null;
+    const problem = sends.inviteProblem(
+      invite && { ...invite, expiresAtMs: invite.expiresAt ? invite.expiresAt.toMillis() : 0 },
+      uid,
+      Date.now(),
+    );
+    if (problem) throw new HttpsError("failed-precondition", problem);
+    const pair = sends.pairId(invite.inviterUid, uid);
+    if (invite.status === "open") {
+      tx.set(
+        db.collection("pairs").doc(pair),
+        {
+          members: [invite.inviterUid, uid],
+          names: { [invite.inviterUid]: invite.inviterName || "", [uid]: myName },
+          createdAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      tx.update(ref, { status: "accepted", acceptedBy: uid, acceptedAt: FieldValue.serverTimestamp(), pairId: pair });
+    }
+    return { pairId: pair, inviterName: invite.inviterName || "" };
+  });
+
+  // Hand over everything scheduled against this invite; deliver what's already due.
+  const waiting = await db.collection("sends").where("inviteToken", "==", token).get();
+  let delivered = 0;
+  for (const doc of waiting.docs) {
+    if (doc.get("recipientUid")) continue;
+    await doc.ref.update({ recipientUid: uid, pairId: result.pairId });
+    if (await deliver(doc.ref)) delivered++;
+  }
+  return { ...result, delivered };
+});
+
+// Schedules (or reschedules, with the latest version of the set) a set for delivery.
+exports.scheduleSend = onCall(async (request) => {
+  const uid = requireUid(request);
+  const d = request.data || {};
+  const setId = requireString(d, "setId", 64);
+  const test = d.test === true;
+  let booklet;
+  try {
+    booklet = sends.cleanBooklet(requireString(d, "booklet", 400_000));
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    throw new HttpsError("invalid-argument", "That set isn't ready to send: it needs a title and at least one album.");
+  }
+  const now = Date.now();
+  let deliverAtMs;
+  try {
+    deliverAtMs = test ? now : sends.deliveryTime(d.deliverAt, now);
+  } catch (_) {
+    throw new HttpsError("invalid-argument", "Pick a delivery date within the next year.");
+  }
+  const fromName = optString(d, "fromName", 80) || (await displayName(uid, request.auth.token.name));
+
+  let recipientUid = null;
+  let pairId = null;
+  let inviteToken = null;
+  if (test) {
+    recipientUid = uid;
+  } else {
+    inviteToken = d.inviteToken;
+    if (!sends.isToken(inviteToken)) throw new HttpsError("failed-precondition", "Make the invite link first.");
+    const invite = await inviteDoc(inviteToken).get();
+    if (!invite.exists || invite.get("inviterUid") !== uid) {
+      throw new HttpsError("failed-precondition", "That invite isn't yours. Make a new link.");
+    }
+    if (invite.get("status") === "accepted") {
+      recipientUid = invite.get("acceptedBy");
+      pairId = invite.get("pairId") || null;
+    }
+  }
+
+  const ref = sendDoc(sends.sendId(uid, setId, test));
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!test && snap.exists && snap.get("status") === "delivered") {
+      throw new HttpsError("failed-precondition", "This set has already been delivered.");
+    }
+    tx.set(ref, {
+      senderUid: uid,
+      fromName,
+      recipientUid,
+      inviteToken,
+      pairId,
+      setId,
+      kind: "group",
+      test,
+      status: "scheduled",
+      deliverAt: Timestamp.fromMillis(deliverAtMs),
+      deliveredAt: null,
+      booklet: JSON.stringify(booklet),
+      createdAt: snap.exists ? snap.get("createdAt") : FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+  });
+  const deliveredNow = await deliver(ref);
+  return {
+    sendId: ref.id,
+    status: deliveredNow ? "delivered" : "scheduled",
+    deliverAt: deliverAtMs,
+    waitingForJoin: !recipientUid,
+  };
+});
+
+exports.cancelSend = onCall(async (request) => {
+  const uid = requireUid(request);
+  const setId = requireString(request.data, "setId", 64);
+  const ref = sendDoc(sends.sendId(uid, setId, false));
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return;
+    if (snap.get("status") === "delivered") {
+      throw new HttpsError("failed-precondition", "It's already been delivered, so it can't be called back.");
+    }
+    tx.delete(ref);
+  });
+  return { cancelled: true };
+});
+
+// Every 15 minutes: deliver whatever has come due. Needs the (status, deliverAt) index in
+// firestore.indexes.json.
+exports.deliverDueSends = onSchedule({ schedule: "every 15 minutes", timeoutSeconds: 300 }, async () => {
+  const due = await db
+    .collection("sends")
+    .where("status", "==", "scheduled")
+    .where("deliverAt", "<=", Timestamp.now())
+    .limit(200)
+    .get();
+  let count = 0;
+  for (const doc of due.docs) {
+    if (!doc.get("recipientUid")) continue; // waiting for the invite to be accepted
+    if (await deliver(doc.ref)) count++;
+  }
+  if (count) logger.info("deliverDueSends", { delivered: count });
 });

@@ -161,6 +161,8 @@ dependencies {
     implementation("com.google.firebase:firebase-auth")
     implementation("com.google.firebase:firebase-firestore")
     implementation("com.google.firebase:firebase-functions")
+    // Push: "a set has arrived" on the recipient's phone.
+    implementation("com.google.firebase:firebase-messaging")
 
     // ---- Google sign-in via Credential Manager (as Kerasma) ----
     implementation("androidx.credentials:credentials:1.3.0")

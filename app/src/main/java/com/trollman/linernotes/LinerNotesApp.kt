@@ -2,6 +2,7 @@ package com.trollman.linernotes
 
 import android.app.Application
 import com.google.firebase.FirebaseApp
+import com.trollman.linernotes.push.PushService
 
 class LinerNotesApp : Application() {
 
@@ -16,5 +17,6 @@ class LinerNotesApp : Application() {
         // needs one stays off rather than crashing (docs/SETUP.md).
         val firebaseReady = BuildConfig.HAS_FIREBASE_CONFIG && FirebaseApp.getApps(this).isNotEmpty()
         graph = AppGraph(this, firebaseReady)
+        PushService.createChannel(this)
     }
 }

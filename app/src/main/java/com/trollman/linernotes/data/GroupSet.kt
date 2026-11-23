@@ -85,6 +85,13 @@ data class GroupSet(
     val playlistUrl: String? = null,
     /** Goes up each time Claude replaces the intro or closing, so open editors pick it up. */
     val frameRev: Int = 0,
+    /** The invite this set goes out on (createInvite in functions/index.js) and its link. */
+    val inviteToken: String? = null,
+    val inviteUrl: String? = null,
+    /** When the sender asked for it to be delivered, in epoch millis. */
+    val deliverAt: Long? = null,
+    /** [updatedAt] of the version last scheduled, so the app can say it's changed since. */
+    val scheduledVersion: Long? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
 ) {

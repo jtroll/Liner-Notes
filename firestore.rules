@@ -3,8 +3,12 @@ rules_version = '2';
 // Phase 0. Each person reads and writes only their own user document, and never the fields the
 // Functions own: the Last.fm and Spotify connections (set only after a real sign-in swap) and the
 // role. Tokens live in users/{uid}/private/*, which no client can touch; the Admin SDK in the
-// Functions ignores these rules. Group sets and writing settings are the owner's alone. Pairs,
-// sends and the recipient's inbox arrive with their own rules in later phases (SPEC.md, "Data model").
+// Functions ignores these rules. Group sets and writing settings are the owner's alone.
+//
+// Sending: invites are read and written only by the Functions. A pair is readable by its two
+// members. A send is readable by its sender, and by its recipient only once it's delivered, so a
+// scheduled present stays a surprise even to someone poking at the database. Only the Functions
+// write pairs and sends.
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
@@ -30,6 +34,22 @@ service cloud.firestore {
       match /settings/{doc} {
         allow read, write: if owner(uid);
       }
+    }
+
+    match /invites/{token} {
+      allow read, write: if false;
+    }
+
+    match /pairs/{pairId} {
+      allow read: if signedIn() && request.auth.uid in resource.data.members;
+      allow write: if false;
+    }
+
+    match /sends/{sendId} {
+      allow read: if signedIn() && (
+        resource.data.senderUid == request.auth.uid
+        || (resource.data.recipientUid == request.auth.uid && resource.data.status == 'delivered'));
+      allow write: if false;
     }
 
     match /{document=**} {

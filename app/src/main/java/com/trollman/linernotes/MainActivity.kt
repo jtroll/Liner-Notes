@@ -8,6 +8,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import com.trollman.linernotes.data.InviteLinks
+import com.trollman.linernotes.push.PushService
 import com.trollman.linernotes.spotify.SpotifySignIn
 import com.trollman.linernotes.ui.AppRoot
 import com.trollman.linernotes.ui.theme.LinerNotesTheme
@@ -40,13 +42,24 @@ class MainActivity : ComponentActivity() {
         handleLink(intent)
     }
 
-    /** Last.fm's approval returns as linernotes://lastfm-callback?token=... (hosting/lastfm-callback). */
+    /**
+     * Links into the app: Last.fm's approval (linernotes://lastfm-callback?token=..., from
+     * hosting/lastfm-callback), invites (linernotes://invite/<token>, from hosting/invite), and a
+     * tapped "set has arrived" notification (the sendId extra).
+     */
     private fun handleLink(intent: Intent?) {
-        val data = intent?.data ?: return
-        if (data.scheme == "linernotes" && data.host == "lastfm-callback") {
-            data.getQueryParameter("token")?.takeIf { it.isNotBlank() }?.let(vm::finishLastFm)
-            // Handled once: a rotation shouldn't send the same token again.
-            intent.data = null
+        intent ?: return
+        intent.getStringExtra(PushService.EXTRA_SEND_ID)?.let { id ->
+            vm.openSend(id)
+            intent.removeExtra(PushService.EXTRA_SEND_ID)
         }
+        val data = intent.data ?: return
+        if (data.scheme != "linernotes") return
+        when (data.host) {
+            "lastfm-callback" -> data.getQueryParameter("token")?.takeIf { it.isNotBlank() }?.let(vm::finishLastFm)
+            "invite" -> data.lastPathSegment?.let(InviteLinks::token)?.let(vm::receiveInvite)
+        }
+        // Handled once: a rotation shouldn't send the same link again.
+        intent.data = null
     }
 }

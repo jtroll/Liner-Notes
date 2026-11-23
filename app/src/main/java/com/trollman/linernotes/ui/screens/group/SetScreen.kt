@@ -466,11 +466,9 @@ private fun BookletTab(set: GroupSet, state: GroupState, vm: GroupSendViewModel,
             }
             Spacer(Modifier.height(12.dp))
         }
-        Spacer(Modifier.height(12.dp))
-        Text(
-            "Sending it, the invite and the printable booklet come next. For now you can build and polish the whole set.",
-            style = MaterialTheme.typography.bodySmall,
-            color = c.inkFaint,
-        )
+        Spacer(Modifier.height(18.dp))
+        SendPanel(set, state, vm)
+        Spacer(Modifier.height(18.dp))
+        PdfPanel(set, state.writing.senderName)
     }
 }

@@ -1,7 +1,7 @@
 name: Backend
 
 # Tests the Cloud Functions on every push that touches the backend, and on a push to main deploys
-# Functions, Firestore rules and Hosting (the Last.fm callback page). The deploy skips with a
+# Functions, Firestore rules and indexes, and Hosting (the Last.fm callback and invite pages). The deploy skips with a
 # notice until the Firebase project exists (docs/SETUP.md).
 
 on:
@@ -10,6 +10,7 @@ on:
     paths:
       - 'functions/**'
       - 'firestore.rules'
+      - 'firestore.indexes.json'
       - 'firebase.json'
       - 'hosting/**'
       - 'app/google-services.json'
@@ -76,5 +77,5 @@ jobs:
           printf '%s' "$SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
           export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
           npx --yes firebase-tools@15 deploy --project "$project" \
-            --only functions,firestore:rules,hosting --non-interactive --force
+            --only functions,firestore:rules,firestore:indexes,hosting --non-interactive --force
           rm -f "$RUNNER_TEMP/sa.json" functions/.env

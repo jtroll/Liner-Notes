@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Inbox
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -44,6 +45,7 @@ import com.trollman.linernotes.data.Period
 import com.trollman.linernotes.spotify.PlayerState
 import com.trollman.linernotes.ui.system.DisplayWindow
 import com.trollman.linernotes.ui.system.DotMatrixText
+import com.trollman.linernotes.ui.system.Led
 import com.trollman.linernotes.ui.system.PhysicalButton
 import com.trollman.linernotes.ui.system.PhysicalTextButton
 import com.trollman.linernotes.ui.system.PlayerDeck
@@ -67,6 +69,8 @@ fun ShelfScreen(
     onOpen: (Album) -> Unit,
     onSettings: () -> Unit,
     onGroupSend: () -> Unit,
+    onInbox: () -> Unit,
+    inboxCount: Int,
 ) {
     val c = liner
     val shelf = ui.shelf
@@ -96,6 +100,16 @@ fun ShelfScreen(
                             shape = RoundedCornerShape(12.dp),
                             contentDescription = "Group send: a set of albums with a note on each",
                         ) { Text("GROUP SEND", style = mono(12.sp), modifier = Modifier.padding(horizontal = 14.dp)) }
+                        Spacer(Modifier.width(10.dp))
+                        PhysicalButton(
+                            onInbox,
+                            Modifier.size(44.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            contentDescription = if (inboxCount > 0) "Inbox, $inboxCount sets" else "Inbox",
+                        ) {
+                            Icon(Icons.Rounded.Inbox, contentDescription = null)
+                            if (inboxCount > 0) Led(on = true, Modifier.align(Alignment.TopEnd).padding(6.dp), size = 7.dp)
+                        }
                         Spacer(Modifier.width(10.dp))
                         PhysicalButton(
                             onSettings,

@@ -11,6 +11,10 @@ import com.trollman.linernotes.data.DemoAlbums
 import com.trollman.linernotes.data.GroupSet
 import com.trollman.linernotes.data.LocalSetStore
 import com.trollman.linernotes.data.NoteState
+import com.trollman.linernotes.data.Received
+import com.trollman.linernotes.data.SendInfo
+import com.trollman.linernotes.data.forRecipient
+import com.trollman.linernotes.data.storeJson
 import com.trollman.linernotes.data.Ranking
 import com.trollman.linernotes.data.SetAlbum
 import com.trollman.linernotes.data.SetEntry
@@ -49,6 +53,11 @@ data class GroupState(
     val lastfmUser: String? = null,
     /** False on a build without Firebase: drafting, fit scores and playlists need the backend. */
     val online: Boolean = false,
+    /** The sender's live sends, by set id (the test sends to oneself left out). */
+    val sends: Map<String, SendInfo> = emptyMap(),
+    /** Sets delivered to this person, newest first. */
+    val inbox: List<Received> = emptyList(),
+    val inboxReady: Boolean = false,
 ) {
     val current: GroupSet? get() = sets.firstOrNull { it.id == openId }
 }
@@ -71,6 +80,7 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
     private var writingJob: Job? = null
     private val albumInfo = mutableMapOf<String, LastFm.AlbumInfo>()
     private val trackPlays = mutableMapOf<String, Deferred<Map<String, Map<String, Int>>>>()
+    private var liveJobs: List<Job> = emptyList()
 
     /** Called whenever the account or Last.fm connection changes. Loads that person's sets. */
     fun start(uid: String?, lastfmUser: String?) {
@@ -80,6 +90,7 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(lastfmUser = lastfmUser) }
         if (!accountChanged && _state.value.ready) return
         store = if (uid != null && graph.cloud != null) CloudSetStore(uid) else LocalSetStore(getApplication())
+        watchSends(uid)
         viewModelScope.launch {
             val sets = runCatching { store.sets() }.onFailure { Log.w(TAG, "Loading sets failed", it) }.getOrDefault(emptyList())
             val writing = runCatching { store.writing() }.getOrDefault(Writing())
@@ -93,9 +104,12 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
     private fun set(id: String): GroupSet? = _state.value.sets.firstOrNull { it.id == id }
 
     /** Changes one set and saves it shortly after. */
-    private fun edit(id: String, change: (GroupSet) -> GroupSet) {
+    /** [touch] false leaves updatedAt alone, for bookkeeping that isn't a change to the set. */
+    private fun edit(id: String, touch: Boolean = true, change: (GroupSet) -> GroupSet) {
         _state.update { s ->
-            s.copy(sets = s.sets.map { if (it.id == id) change(it).copy(updatedAt = System.currentTimeMillis()) else it })
+            s.copy(sets = s.sets.map {
+                if (it.id != id) it else change(it).let { c -> if (touch) c.copy(updatedAt = System.currentTimeMillis()) else c }
+            })
         }
         saveJobs[id]?.cancel()
         saveJobs[id] = viewModelScope.launch {
@@ -412,6 +426,102 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---- Sending --------------------------------------------------------------------------------
+
+    /** Follows this person's sends and inbox in Firestore. */
+    private fun watchSends(uid: String?) {
+        liveJobs.forEach { it.cancel() }
+        _state.update { it.copy(sends = emptyMap(), inbox = emptyList(), inboxReady = false) }
+        val cloud = graph.cloud
+        if (uid == null || cloud == null) {
+            liveJobs = emptyList()
+            _state.update { it.copy(inboxReady = true) }
+            return
+        }
+        liveJobs = listOf(
+            viewModelScope.launch {
+                cloud.sendsFrom(uid).collect { list ->
+                    _state.update { s -> s.copy(sends = list.filter { !it.test }.associateBy { it.setId }) }
+                }
+            },
+            viewModelScope.launch {
+                cloud.inbox(uid).collect { list -> _state.update { it.copy(inbox = list, inboxReady = true) } }
+            },
+        )
+    }
+
+    /** How the sender signs: their writing settings' name, else their Google first name. */
+    private fun fromName(): String =
+        _state.value.writing.senderName.ifBlank { graph.auth?.current?.displayName?.substringBefore(' ').orEmpty() }
+
+    /** Makes the invite link the set goes out on. */
+    fun makeInvite(id: String) {
+        val cloud = graph.cloud ?: return say("Invites need the backend (docs/SETUP.md).")
+        val s = set(id) ?: return
+        viewModelScope.launch {
+            busy("invite:$id", true)
+            try {
+                val invite = cloud.createInvite(s.forName, fromName())
+                edit(id, touch = false) { it.copy(inviteToken = invite.token, inviteUrl = invite.url) }
+            } catch (e: Exception) {
+                say("Couldn't make the invite: ${describeError(e)}")
+            } finally {
+                busy("invite:$id", false)
+            }
+        }
+    }
+
+    /** Schedules the set as it is now for [deliverAt] (epoch millis), or updates the scheduled copy. */
+    fun schedule(id: String, deliverAt: Long) = send(id, deliverAt, test = false)
+
+    /** Delivers a copy to the sender's own inbox right away, to see it as the recipient will. */
+    fun sendTest(id: String) = send(id, System.currentTimeMillis(), test = true)
+
+    private fun send(id: String, deliverAt: Long, test: Boolean) {
+        val cloud = graph.cloud ?: return say("Sending needs the backend (docs/SETUP.md).")
+        val s = set(id) ?: return
+        if (s.entries.isEmpty()) return say("Pick some albums first.")
+        if (!test && s.inviteToken == null) return say("Make the invite link first.")
+        val key = if (test) "test:$id" else "send:$id"
+        viewModelScope.launch {
+            busy(key, true)
+            try {
+                val json = storeJson.encodeToString(GroupSet.serializer(), s.forRecipient())
+                val r = cloud.scheduleSend(id, json, deliverAt, s.inviteToken, fromName(), test)
+                if (!test) edit(id, touch = false) { it.copy(deliverAt = r.deliverAt, scheduledVersion = s.updatedAt) }
+                val name = s.forName.ifBlank { "them" }
+                say(
+                    when {
+                        test -> "A copy is in your inbox, as $name will see it."
+                        r.status == "delivered" -> "Delivered to $name."
+                        r.waitingForJoin -> "Scheduled for ${whenText(r.deliverAt)}. It reaches $name once they join with your invite."
+                        else -> "Scheduled for ${whenText(r.deliverAt)}."
+                    }
+                )
+            } catch (e: Exception) {
+                say("Couldn't send it: ${describeError(e)}")
+            } finally {
+                busy(key, false)
+            }
+        }
+    }
+
+    fun cancelSend(id: String) {
+        val cloud = graph.cloud ?: return
+        viewModelScope.launch {
+            busy("send:$id", true)
+            try {
+                cloud.cancelSend(id)
+                edit(id, touch = false) { it.copy(scheduledVersion = null) }
+                say("Cancelled. Nothing will be delivered.")
+            } catch (e: Exception) {
+                say("Couldn't cancel it: ${describeError(e)}")
+            } finally {
+                busy("send:$id", false)
+            }
+        }
+    }
+
     // ---- Writing settings -----------------------------------------------------------------------
 
     fun saveWriting(writing: Writing) {
@@ -427,6 +537,12 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
         private const val TAG = "GroupSend"
     }
 }
+
+private val whenFormat = DateTimeFormatter.ofPattern("EEE MMM d, h:mm a", Locale.getDefault())
+
+/** "Fri Dec 25, 8:00 AM", in the phone's time zone. */
+fun whenText(millis: Long): String =
+    java.time.Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).format(whenFormat)
 
 /** A short reason for a failed call, in words for the person. */
 fun describeError(e: Throwable): String = when (e) {

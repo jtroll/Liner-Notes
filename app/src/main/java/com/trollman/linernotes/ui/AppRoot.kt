@@ -1,6 +1,21 @@
 package com.trollman.linernotes.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.core.content.ContextCompat
+import com.trollman.linernotes.InvitePrompt
+import com.trollman.linernotes.ui.screens.inbox.InboxScreen
+import com.trollman.linernotes.ui.screens.inbox.ReceivedScreen
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -49,12 +64,15 @@ private sealed interface Place {
     data class SetOpen(val id: String) : Place
     data class Note(val setId: String, val key: String) : Place
     data object Writing : Place
+    data object Inbox : Place
+    data class Received(val id: String) : Place
 }
 
 /** Where Back goes from each place. */
 private fun Place.up(): Place = when (this) {
     is Place.Note -> Place.SetOpen(setId)
     is Place.SetOpen, Place.Writing -> Place.Sets
+    is Place.Received -> Place.Inbox
     else -> Place.Shelf
 }
 
@@ -87,6 +105,27 @@ fun AppRoot(vm: AppViewModel, onConnectSpotify: () -> Unit) {
     }
 
     val gate = if (ui.gate == Gate.SetupNeeded && ui.browsingDemo) Gate.Shelf else ui.gate
+
+    // "A set has arrived" needs permission on Android 13+. Asked when it starts to matter: on
+    // joining with an invite, or on first opening the inbox.
+    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    var askedNotifications by remember { mutableStateOf(false) }
+    val askNotifications: () -> Unit = {
+        if (!askedNotifications && Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            askedNotifications = true
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    // A tapped notification or a just-accepted invite.
+    LaunchedEffect(ui.goTo, gate) {
+        val target = ui.goTo ?: return@LaunchedEffect
+        if (gate != Gate.Shelf) return@LaunchedEffect
+        place = if (target.startsWith("send:")) Place.Received(target.removePrefix("send:")) else Place.Inbox
+        vm.consumeGoTo()
+    }
     BackHandler(enabled = gate == Gate.Shelf && place != Place.Shelf) { place = place.up() }
 
     Box(Modifier.fillMaxSize().background(liner.casing)) {
@@ -112,6 +151,8 @@ fun AppRoot(vm: AppViewModel, onConnectSpotify: () -> Unit) {
                                 onOpen = { place = Place.AlbumOpen(it) },
                                 onSettings = { place = Place.Settings },
                                 onGroupSend = { place = Place.Sets },
+                                onInbox = { place = Place.Inbox },
+                                inboxCount = groupState.inbox.size,
                             )
                             is Place.AlbumOpen -> AlbumScreen(
                                 album = p.album,
@@ -171,6 +212,37 @@ fun AppRoot(vm: AppViewModel, onConnectSpotify: () -> Unit) {
                                     )
                                 }
                             }
+                            Place.Inbox -> {
+                                LaunchedEffect(Unit) { askNotifications() }
+                                InboxScreen(
+                                    state = groupState,
+                                    joining = "invite" in ui.busy,
+                                    onBack = { place = Place.Shelf },
+                                    onOpen = { id -> place = Place.Received(id) },
+                                    onJoin = vm::joinWithLink,
+                                )
+                            }
+                            is Place.Received -> {
+                                val received = groupState.inbox.firstOrNull { it.id == p.id }
+                                if (received == null) {
+                                    // Not arrived on this phone yet (or gone): the inbox shows what's here.
+                                    InboxScreen(
+                                        state = groupState,
+                                        joining = "invite" in ui.busy,
+                                        onBack = { place = Place.Shelf },
+                                        onOpen = { id -> place = Place.Received(id) },
+                                        onJoin = vm::joinWithLink,
+                                    )
+                                } else {
+                                    ReceivedScreen(
+                                        received = received,
+                                        onBack = { place = Place.Inbox },
+                                        onPlay = { a -> vm.play(context.findActivity(), a.toAlbum(), a.spotifyUri) },
+                                        onOpenInSpotify = { a -> vm.openInSpotify(context, a.toAlbum(), a.spotifyUri) },
+                                        onOpenLink = openLink,
+                                    )
+                                }
+                            }
                             Place.Writing -> if (groupState.ready) {
                                 WritingScreen(
                                     writing = groupState.writing,
@@ -185,4 +257,51 @@ fun AppRoot(vm: AppViewModel, onConnectSpotify: () -> Unit) {
         }
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding())
     }
+
+    val invite = ui.invite
+    if (invite != null && ui.account != null) {
+        InviteDialog(
+            prompt = invite,
+            joining = "invite" in ui.busy,
+            onJoin = { askNotifications(); vm.acceptInvite() },
+            onDismiss = vm::dismissInvite,
+        )
+    }
+}
+
+/** "Join J.T.'s Liner Notes?" for an opened invite link. */
+@Composable
+private fun InviteDialog(prompt: InvitePrompt, joining: Boolean, onJoin: () -> Unit, onDismiss: () -> Unit) {
+    val info = prompt.info
+    val problem = prompt.error ?: info?.problem
+    val inviter = info?.inviterName?.ifBlank { null } ?: "Someone"
+    AlertDialog(
+        onDismissRequest = { if (!joining) onDismiss() },
+        title = {
+            Text(
+                when {
+                    problem != null -> "This invite can't be used"
+                    info == null -> "Opening the invite"
+                    else -> "Join $inviter on Liner Notes?"
+                }
+            )
+        },
+        text = {
+            when {
+                problem != null -> Text(problem)
+                info == null || joining -> Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator()
+                }
+                else -> Text("You'll be paired with $inviter, so the albums they send you arrive in your inbox, each with a note.")
+            }
+        },
+        confirmButton = {
+            if (problem == null && info != null) {
+                TextButton(onClick = onJoin, enabled = !joining) { Text("Join") }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !joining) { Text(if (problem != null) "Close" else "Not now") }
+        },
+    )
 }
