@@ -27,12 +27,9 @@ import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,13 +52,13 @@ import com.trollman.linernotes.ui.system.Led
 import com.trollman.linernotes.ui.system.Panel
 import com.trollman.linernotes.ui.system.PhysicalButton
 import com.trollman.linernotes.ui.system.PhysicalTextButton
+import com.trollman.linernotes.ui.system.RotaryDial
 import com.trollman.linernotes.ui.system.SectionLabel
 import com.trollman.linernotes.ui.theme.liner
 import com.trollman.linernotes.ui.theme.mono
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
-import kotlin.math.roundToInt
 
 /** Group send's front page: your sets, and a new one. */
 @Composable
@@ -185,7 +182,7 @@ private fun NewSetPanel(
     var name by rememberSaveable { mutableStateOf("") }
     var taste by rememberSaveable { mutableStateOf("") }
     var yearList by rememberSaveable { mutableStateOf(true) }
-    var months by remember { mutableFloatStateOf(6f) }
+    var months by remember { mutableIntStateOf(6) }
     var count by remember { mutableIntStateOf(12) }
     val year = LocalDate.now().year
 
@@ -208,17 +205,8 @@ private fun NewSetPanel(
         AnimatedVisibility(visible = !yearList) {
             Column {
                 SectionLabel("How far back")
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Slider(
-                        value = months,
-                        onValueChange = { months = it },
-                        valueRange = 1f..12f,
-                        steps = 10,
-                        colors = SliderDefaults.colors(thumbColor = c.signal, activeTrackColor = c.signal),
-                        modifier = Modifier.weight(1f),
-                    )
-                    Spacer(Modifier.width(14.dp))
-                    DotMatrixText("${months.roundToInt()} MO", size = 32.sp, color = c.ink, maxLines = 1)
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    RotaryDial(value = months, onValueChange = { months = it })
                 }
                 SectionLabel("How many albums")
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -248,7 +236,7 @@ private fun NewSetPanel(
             PhysicalTextButton("Cancel", onCancel, Modifier.weight(1f))
             PhysicalTextButton(
                 "Start",
-                { onCreate(name, taste, yearList, months.roundToInt(), count) },
+                { onCreate(name, taste, yearList, months, count) },
                 Modifier.weight(1f),
                 accent = true,
                 enabled = name.isNotBlank(),
