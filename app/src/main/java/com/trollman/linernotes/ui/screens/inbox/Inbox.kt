@@ -54,6 +54,7 @@ import com.trollman.linernotes.ui.screens.group.Booklet
 import com.trollman.linernotes.ui.screens.group.IconKey
 import com.trollman.linernotes.ui.screens.group.PdfPanel
 import com.trollman.linernotes.ui.system.CoverArt
+import com.trollman.linernotes.ui.system.Led
 import com.trollman.linernotes.ui.system.DisplayWindow
 import com.trollman.linernotes.ui.system.DotMatrixText
 import com.trollman.linernotes.ui.system.Panel
@@ -235,6 +236,9 @@ fun ReceivedScreen(
                 }
             }
             item { Letter(set, received.fromName) }
+            influenceLine(received, 0)?.let { line ->
+                item { Box(Modifier.padding(horizontal = 18.dp)) { InfluenceNote(line) } }
+            }
             item {
                 Box(Modifier.padding(horizontal = 18.dp)) {
                     ReactionPanel(e.album.title, received.reactions[0], canReact, "react:${received.id}:0" in busy, received.fromName) { r, comment ->
@@ -249,6 +253,17 @@ fun ReceivedScreen(
             item {
                 Box(Modifier.padding(horizontal = 18.dp)) {
                     PhysicalTextButton("Open the playlist in Spotify", { onOpenLink(url) }, Modifier.fillMaxWidth(), accent = true)
+                }
+            }
+        }
+        received.influence.current?.let { look ->
+            item {
+                Box(Modifier.padding(horizontal = 18.dp)) {
+                    val best = look.best.mapNotNull { set.entries.getOrNull(it)?.album?.title }
+                    InfluenceNote(
+                        "${look.total} influence points after ${look.days} days" +
+                            if (best.isEmpty()) "." else ". Landed best: ${best.joinToString(", ")}.",
+                    )
                 }
             }
         }
@@ -268,12 +283,38 @@ fun ReceivedScreen(
                         IconKey(Icons.AutoMirrored.Rounded.OpenInNew, "Open ${e.album.title} in Spotify", onClick = { onOpenInSpotify(e.album) })
                     }
                 }
+                influenceLine(received, i)?.let { line ->
+                    Text(line, style = MaterialTheme.typography.bodySmall, color = c.inkSoft, modifier = Modifier.padding(start = 28.dp, top = 4.dp))
+                }
                 ReactionKeys(e.album.title, received.reactions[i], canReact, "react:${received.id}:$i" in busy) { r -> onReact(i, r, received.reactions[i]?.comment ?: "") }
             }
         }
         item {
             Box(Modifier.padding(horizontal = 18.dp)) { PdfPanel(set, received.fromName) }
         }
+    }
+}
+
+/**
+ * The influence line for album [index], in the second person for the recipient ("You've played
+ * it 14 times") and as written for the sender ("Sam has played it 14 times").
+ */
+private fun influenceLine(received: Received, index: Int): String? {
+    val line = received.influence.current?.items?.get(index)?.line?.takeIf { it.isNotBlank() } ?: return null
+    if (received.mine) return line
+    return line
+        .replaceFirst(Regex("""^.+? hasn't played"""), "You haven't played")
+        .replaceFirst(Regex("""^.+? has played"""), "You've played")
+        .replace("made their top 20", "made your top 20")
+}
+
+@Composable
+private fun InfluenceNote(text: String) {
+    val c = liner
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Led(on = true)
+        Spacer(Modifier.width(10.dp))
+        Text(text, style = MaterialTheme.typography.bodySmall, color = c.ink)
     }
 }
 

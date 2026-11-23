@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.google.firebase.functions.FirebaseFunctionsException
 import com.trollman.linernotes.data.Candidate
 import com.trollman.linernotes.data.History
+import com.trollman.linernotes.data.Meter
 import com.trollman.linernotes.data.SavedAlbum
 import com.trollman.linernotes.data.CloudSetStore
 import com.trollman.linernotes.data.Invite
@@ -102,6 +103,15 @@ data class GroupState(
         writing.saved.filter { it.forName.isBlank() || History.sameName(it.forName, forName) }
 
     fun isSaved(album: SetAlbum): Boolean = writing.saved.any { History.matchKey(it.album) == History.matchKey(album) }
+
+    /** The pair's two meters: this person's sends to the partner, and the partner's to them. */
+    fun meters(pairId: String): Pair<Meter, Meter> {
+        val mine = sendsById.values.filter { it.pairId == pairId && it.delivered && !it.test }
+            .map { Triple(it.deliveredAt ?: it.deliverAt, it.influence, it.set?.entries?.size ?: 0) }
+        val theirs = inbox.filter { it.pairId == pairId && !it.test }
+            .map { Triple(it.deliveredAt, it.influence, it.set.entries.size) }
+        return Meter.of(mine) to Meter.of(theirs)
+    }
 }
 
 /**
@@ -806,6 +816,20 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
         val cloud = graph.cloud ?: return
         viewModelScope.launch {
             runCatching { cloud.updatePair(pairId, changes) }.onFailure { e -> say("Couldn't change that: ${describeError(e)}") }
+        }
+    }
+
+    /** Measures every send in the pair now, rather than waiting for the morning job. */
+    fun checkInfluence(pairId: String) {
+        val cloud = graph.cloud ?: return say("Influence needs the backend (docs/SETUP.md).")
+        val key = "influence:$pairId"
+        if (key in _state.value.busy) return
+        viewModelScope.launch {
+            busy(key, true)
+            runCatching { cloud.influenceNow(pairId) }
+                .onSuccess { n -> say(if (n == 0) "Nothing new to measure yet. Sends are measured from a day after they arrive." else "Updated $n ${if (n == 1) "send" else "sends"}.") }
+                .onFailure { e -> say("Couldn't measure just now: ${describeError(e)}") }
+            busy(key, false)
         }
     }
 

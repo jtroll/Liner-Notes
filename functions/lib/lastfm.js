@@ -72,4 +72,75 @@ async function topAlbums(apiKey, user, period, limit) {
   return parseTopAlbums(await publicCall(apiKey, "user.gettopalbums", { user, period, limit }));
 }
 
-module.exports = { signature, getSession, publicCall, parseTopArtists, parseTopAlbums, topArtists, topAlbums };
+/** user.getWeeklyChartList, as [{from, to}] in unix seconds, oldest first. */
+function parseChartList(body) {
+  return asList(body && body.weeklychartlist && body.weeklychartlist.chart)
+    .map((c) => ({ from: Number(c.from), to: Number(c.to) }))
+    .filter((c) => c.from > 0 && c.to > c.from);
+}
+
+/** user.getWeeklyAlbumChart, as [[artist, title, plays]]. */
+function parseWeeklyAlbums(body) {
+  return asList(body && body.weeklyalbumchart && body.weeklyalbumchart.album)
+    .filter((a) => a && a.name && a.artist)
+    .map((a) => [String(a.artist["#text"] || a.artist.name || ""), String(a.name), Number(a.playcount) || 0])
+    .filter((a) => a[0] && a[2] > 0);
+}
+
+/** user.getWeeklyArtistChart, as [[name, plays]]. */
+function parseWeeklyArtists(body) {
+  return asList(body && body.weeklyartistchart && body.weeklyartistchart.artist)
+    .filter((a) => a && a.name)
+    .map((a) => [String(a.name), Number(a.playcount) || 0])
+    .filter((a) => a[1] > 0);
+}
+
+async function chartList(apiKey, user) {
+  return parseChartList(await publicCall(apiKey, "user.getweeklychartlist", { user }));
+}
+
+/** One week's albums and artists for a user (the top 300 of each). */
+async function week(apiKey, user, from, to) {
+  const [albums, artists] = await Promise.all([
+    publicCall(apiKey, "user.getweeklyalbumchart", { user, from, to }),
+    publicCall(apiKey, "user.getweeklyartistchart", { user, from, to }),
+  ]);
+  return { albums: parseWeeklyAlbums(albums).slice(0, 300), artists: parseWeeklyArtists(artists).slice(0, 300) };
+}
+
+/** How many tracks an album has, from album.getInfo; 0 when unknown. */
+async function trackCount(apiKey, artist, album) {
+  try {
+    const body = await publicCall(apiKey, "album.getinfo", { artist, album, autocorrect: 1 });
+    return asList(body && body.album && body.album.tracks && body.album.tracks.track).length;
+  } catch (_) {
+    return 0;
+  }
+}
+
+/** artist.getSimilar's names, closest first. */
+async function similarArtists(apiKey, artist, limit = 15) {
+  try {
+    const body = await publicCall(apiKey, "artist.getsimilar", { artist, limit, autocorrect: 1 });
+    return asList(body && body.similarartists && body.similarartists.artist).map((a) => String(a.name || "")).filter(Boolean);
+  } catch (_) {
+    return [];
+  }
+}
+
+module.exports = {
+  signature,
+  getSession,
+  publicCall,
+  parseTopArtists,
+  parseTopAlbums,
+  topArtists,
+  topAlbums,
+  parseChartList,
+  parseWeeklyAlbums,
+  parseWeeklyArtists,
+  chartList,
+  week,
+  trackCount,
+  similarArtists,
+};

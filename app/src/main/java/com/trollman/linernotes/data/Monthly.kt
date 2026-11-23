@@ -23,7 +23,11 @@ data class PairInfo(
     val draftDay: Int = 1,
     /** Hold the monthly send in December when a year-end set is going to the same person. */
     val decemberPause: Boolean = true,
+    /** Influence sharing: each member's own choice; it runs only when both are on. */
+    val influenceMine: Boolean = false,
+    val influencePartner: Boolean = false,
 ) {
+    val sharing: Boolean get() = influenceMine && influencePartner
     val label: String get() = nickname.ifBlank { partnerName.ifBlank { "Your pair" } }
     val who: String get() = partnerName.ifBlank { "them" }
 }

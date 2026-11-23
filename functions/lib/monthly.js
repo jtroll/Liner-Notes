@@ -134,7 +134,7 @@ function suggestPrompt(input) {
     `- Prefer an album that bridges to an artist or album ${recipient} already loves over one that is merely popular.\n` +
     `- Weigh how much ${sender} played it: a real favourite makes a better gift than a passing listen.\n` +
     "- Vary the picks from month to month (genre, era, mood), so recent picks shouldn't be repeated in spirit.\n" +
-    `- Learn from how past picks landed with ${recipient}: lean towards what they loved and away from what wasn't for them.\n` +
+    `- Learn from how past picks landed with ${recipient} (their reactions, and what showed up in their listening afterwards): lean towards what landed and away from what didn't.\n` +
     "- Candidates marked (from earlier) were played before last month; use them only if they're clearly better.\n\n" +
     "Rank one suggestion and two alternates. For each, give a confidence from 1 to 5 that it will land, and the connection: " +
     `which of ${recipient}'s artists or albums it relates to and how, in at most 20 words, written to ${sender}.\n` +
@@ -154,6 +154,13 @@ function suggestPrompt(input) {
     `Past picks that weren't for ${recipient}: ${list(r.notForMe, 10)}`,
     `${sender}'s recent monthly picks for ${recipient}: ${list(input.recentPicks, 6)}`,
   );
+  const l = input.landed || {};
+  if ((l.well && l.well.length) || (l.not && l.not.length)) {
+    lines.push(
+      `Past picks that showed up in ${recipient}'s listening afterwards: ${list(l.well, 10)}`,
+      `Past picks ${recipient} never got into: ${list(l.not, 10)}`,
+    );
+  }
   const candidates = input.candidates
     .map((c) => {
       const plays = c.plays ? `, played ${c.plays} times${c.weeks > 1 ? ` over ${c.weeks} weeks` : ""}` : "";

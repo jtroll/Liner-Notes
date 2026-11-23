@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.trollman.linernotes.GroupSendViewModel
 import com.trollman.linernotes.GroupState
+import com.trollman.linernotes.data.Meter
 import com.trollman.linernotes.data.Monthly
 import com.trollman.linernotes.data.PairInfo
 import com.trollman.linernotes.data.Received
@@ -57,6 +58,7 @@ import com.trollman.linernotes.ui.system.Led
 import com.trollman.linernotes.ui.system.Panel
 import com.trollman.linernotes.ui.system.PhysicalTextButton
 import com.trollman.linernotes.ui.system.SectionLabel
+import com.trollman.linernotes.ui.system.VuMeter
 import com.trollman.linernotes.ui.theme.liner
 import com.trollman.linernotes.ui.theme.mono
 import com.trollman.linernotes.whenText
@@ -269,6 +271,7 @@ fun PairScreen(
                 Spacer(Modifier.height(12.dp))
             }
         }
+        item { InfluencePanel(pair, state, vm) }
         if (history.isNotEmpty()) item { SectionLabel("Sends both ways") }
         items(history, key = { it.id }) { r -> HistoryRow(r, pair, onClick = { onOpenSend(r) }) }
         item { PairSettings(pair, vm) }
@@ -303,6 +306,10 @@ private fun HistoryRow(r: Received, pair: PairInfo, onClick: () -> Unit) {
                 style = mono(10.sp),
                 color = c.inkFaint,
             )
+            r.influence.current?.let { look ->
+                val line = if (r.isMonthly) look.items[0]?.line else "${look.total} influence points"
+                if (!line.isNullOrBlank()) Text(line, style = MaterialTheme.typography.bodySmall, color = c.inkSoft, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
             val reacted = r.reactions.values.mapNotNull { it.label.ifBlank { null } }
             if (reacted.isNotEmpty()) {
                 Text(
@@ -315,6 +322,65 @@ private fun HistoryRow(r: Received, pair: PairInfo, onClick: () -> Unit) {
             }
         }
     }
+}
+
+/**
+ * Influence (SPEC.md, "Influence"): a meter for each direction, once both people have turned
+ * sharing on. Warm, not competitive: just the two of them.
+ */
+@Composable
+private fun InfluencePanel(pair: PairInfo, state: GroupState, vm: GroupSendViewModel) {
+    val c = liner
+    val checking = "influence:${pair.id}" in state.busy
+    Panel {
+        Spacer(Modifier.height(8.dp))
+        SectionLabel("Influence")
+        if (pair.sharing) {
+            val (mine, theirs) = state.meters(pair.id)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                MeterFor("YOU → ${pair.who.uppercase()}", mine, "Your sends in ${pair.who}'s listening", Modifier.weight(1f))
+                MeterFor("${pair.who.uppercase()} → YOU", theirs, "${pair.who}'s sends in your listening", Modifier.weight(1f))
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Points for each album played through, come back to, the artist explored, a new top 20 artist, and similar artists found. Measured at 30 and 90 days, with a running look in between.",
+                style = MaterialTheme.typography.bodySmall,
+                color = c.inkSoft,
+            )
+            Spacer(Modifier.height(10.dp))
+            Busy(checking) {
+                PhysicalTextButton("Check now", { vm.checkInfluence(pair.id) }, Modifier.fillMaxWidth(), enabled = state.online)
+            }
+            Spacer(Modifier.height(10.dp))
+        } else {
+            Text(
+                "See how much your sends show up in each other's listening, from Last.fm. It only runs when you both turn it on, and only these summaries are shared.",
+                style = MaterialTheme.typography.bodySmall,
+                color = c.inkSoft,
+            )
+            Spacer(Modifier.height(10.dp))
+        }
+        HardwareSwitch(
+            checked = pair.influenceMine,
+            onToggle = { vm.updatePair(pair.id, mapOf("influence" to it)) },
+            label = "Share influence",
+            description = if (pair.influencePartner) "${pair.who} has it on." else "${pair.who} hasn't turned it on yet.",
+        )
+        Spacer(Modifier.height(12.dp))
+    }
+}
+
+@Composable
+private fun MeterFor(caption: String, m: Meter, description: String, modifier: Modifier) {
+    val level = m.needle(m.allTime, m.allTimeAlbums)
+    VuMeter(
+        level = level,
+        score = m.allTime.toString().padStart(2, '0'),
+        caption = if (m.measured == 0) "NOT MEASURED YET" else caption,
+        description = if (m.measured == 0) "$description: not measured yet." else
+            "$description: ${m.allTime} points across ${m.allTimeAlbums} albums, ${m.latest} from the latest send.",
+        modifier = modifier,
+    )
 }
 
 @Composable

@@ -12,6 +12,7 @@ import android.util.Log
 import com.trollman.linernotes.data.Candidate
 import com.trollman.linernotes.data.Fit
 import com.trollman.linernotes.data.History
+import com.trollman.linernotes.data.Influence
 import com.trollman.linernotes.data.PairInfo
 import com.trollman.linernotes.data.Pick
 import com.trollman.linernotes.data.Reaction
@@ -280,6 +281,7 @@ class Cloud {
                         fromName = d.getString("fromName") ?: "",
                         set = d.getString("booklet")?.let { booklet(it) },
                         reactions = reactions(d.get("reactions")),
+                        influence = Influence.parse(d.get("influence")),
                     )
                 }
             )
@@ -308,6 +310,7 @@ class Cloud {
                             pairId = d.getString("pairId"),
                             kind = d.getString("kind") ?: "group",
                             reactions = reactions(d.get("reactions")),
+                            influence = Influence.parse(d.get("influence")),
                         )
                     }.sortedByDescending { it.deliveredAt }
                 )
@@ -347,6 +350,8 @@ class Cloud {
                         monthlyOn = d.getBoolean("monthlyOn") ?: true,
                         draftDay = d.getLong("draftDay")?.toInt() ?: 1,
                         decemberPause = d.getBoolean("decemberPause") ?: true,
+                        influenceMine = (d.get("influence") as? Map<*, *>)?.get(uid) == true,
+                        influencePartner = (d.get("influence") as? Map<*, *>)?.get(partner) == true,
                     )
                 }.sortedBy { it.label.lowercase() }
             )
@@ -403,6 +408,12 @@ class Cloud {
     /** Changes the pair's settings: any of nickname, monthlyOn, draftDay, decemberPause. */
     suspend fun updatePair(pairId: String, changes: Map<String, Any>) {
         call("updatePair", changes + ("pairId" to pairId))
+    }
+
+    /** A fresh look at what every send in the pair did to the other's listening; returns how many it measured. */
+    suspend fun influenceNow(pairId: String): Int {
+        val r = call("influenceNow", mapOf("pairId" to pairId), timeoutSeconds = 300)
+        return (r["measured"] as? Number)?.toInt() ?: 0
     }
 
     /** Saves this phone's push token on the user document, so delivered sets can ping it. */

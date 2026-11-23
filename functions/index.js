@@ -40,6 +40,8 @@ const facts = require("./lib/facts");
 const notes = require("./lib/notes");
 const sends = require("./lib/sends");
 const monthly = require("./lib/monthly");
+const influence = require("./lib/influence");
+const crypto = require("node:crypto");
 const Anthropic = require("@anthropic-ai/sdk");
 
 initializeApp();
@@ -641,6 +643,7 @@ exports.monthlySuggest = onCall({ secrets: [ANTHROPIC_API_KEY], timeoutSeconds: 
   const sent = new Set();
   const reactions = { loved: [], liked: [], notForMe: [] };
   const recent = [];
+  const results = [];
   const pairSends = await db.collection("sends").where("pairId", "==", d.pairId).get();
   for (const doc of pairSends.docs) {
     for (const k of monthly.bookletKeys(doc.get("booklet"))) sent.add(k);
@@ -657,6 +660,14 @@ exports.monthlySuggest = onCall({ secrets: [ANTHROPIC_API_KEY], timeoutSeconds: 
     }
     if (doc.get("kind") === "monthly" && entries[0]) {
       recent.push({ at: doc.get("deliverAt") ? doc.get("deliverAt").toMillis() : 0, h: heading(entries[0].album) });
+    }
+    const inf = doc.get("influence") || {};
+    const look = inf.d90 || inf.d30 || inf.latest;
+    if (look && look.items) {
+      for (const [i, r] of Object.entries(look.items)) {
+        const e = entries[Number(i)];
+        if (e && r) results.push({ heading: heading(e.album), points: Number(r.points) || 0, measured: true });
+      }
     }
   }
 
@@ -696,6 +707,7 @@ exports.monthlySuggest = onCall({ secrets: [ANTHROPIC_API_KEY], timeoutSeconds: 
       candidates: fresh,
       taste,
       reactions,
+      landed: influence.landed(results),
       recentPicks: recent.sort((a, b) => b.at - a.at).slice(0, 6).map((r) => r.h),
     });
     const byId = new Map(fresh.map((c) => [c.id, c]));
@@ -799,6 +811,8 @@ exports.updatePair = onCall(async (request) => {
   } catch (err) {
     throw new HttpsError("invalid-argument", err.message);
   }
+  // Influence sharing is each member's own choice; it runs only when both have it on.
+  if (typeof d.influence === "boolean") changes[`influence.${uid}`] = d.influence;
   if (Object.keys(changes).length) await ref.update({ ...changes, updatedAt: FieldValue.serverTimestamp() });
   return { saved: true };
 });
@@ -841,3 +855,188 @@ exports.monthlyReminders = onSchedule(
     if (count) logger.info("monthlyReminders", { sent: count });
   },
 );
+
+// ---- Influence ------------------------------------------------------------------------------
+//
+// How much each person's sends showed up in the other's listening (SPEC.md, "Influence"), from
+// the recipient's Last.fm weekly charts: the 90 days before a send as the baseline, then a running
+// look from a week after delivery, and the 30 and 90 day marks. Only for pairs where both people
+// turned sharing on. The weekly charts are cached in the recipient's own users/{uid}/weeks, and
+// only the per-album summaries are written to the send, where the sender can read them.
+
+const sha = (s) => crypto.createHash("sha256").update(s).digest("hex").slice(0, 32);
+
+/** Per-run caches, so a job reading many sends asks Last.fm for each thing once. */
+function influenceRun() {
+  return { pairs: new Map(), users: new Map(), lists: new Map(), tracks: new Map(), similar: new Map() };
+}
+
+async function cached(map, key, load) {
+  if (!map.has(key)) map.set(key, load());
+  return map.get(key);
+}
+
+/** The recipient's charts for the weeks in [startMs, endMs), from the cache or Last.fm. */
+async function weeksFor(run, uid, user, startMs, endMs, slackDays) {
+  const key = LASTFM_API_KEY.value();
+  const list = await cached(run.lists, user, () => lastfm.chartList(key, user));
+  const wanted = influence.weeksBetween(list, startMs, endMs, slackDays);
+  const col = userDoc(uid).collection("weeks");
+  const snaps = await Promise.all(wanted.map((w) => col.doc(String(w.from)).get()));
+  const out = [];
+  const missing = [];
+  snaps.forEach((snap, i) => {
+    if (snap.exists && snap.get("user") === user) out.push(JSON.parse(snap.get("json")));
+    else missing.push(wanted[i]);
+  });
+  for (let i = 0; i < missing.length; i += 3) {
+    const got = await Promise.all(missing.slice(i, i + 3).map(async (w) => {
+      const data = await lastfm.week(key, user, w.from, w.to);
+      await col.doc(String(w.from)).set({ user, from: w.from, to: w.to, json: JSON.stringify(data), at: FieldValue.serverTimestamp() });
+      return data;
+    }));
+    out.push(...got);
+  }
+  return out;
+}
+
+/** An album's track count, cached in albums/{hash} (shared album facts). */
+async function trackCountFor(run, album) {
+  const k = influence.albumKey(album.artist, album.title);
+  return cached(run.tracks, k, async () => {
+    const ref = db.collection("albums").doc(sha(k));
+    const snap = await ref.get();
+    if (snap.exists && typeof snap.get("trackCount") === "number") return snap.get("trackCount");
+    const n = await lastfm.trackCount(LASTFM_API_KEY.value(), album.artist, album.title);
+    if (n > 0) await ref.set({ artist: album.artist, title: album.title, trackCount: n }, { merge: true });
+    return n;
+  });
+}
+
+/** Last.fm's similar artists, cached in artists/{hash} for 90 days. */
+async function similarFor(run, artist) {
+  const k = influence.norm(artist);
+  return cached(run.similar, k, async () => {
+    const ref = db.collection("artists").doc(sha(k));
+    const snap = await ref.get();
+    const at = snap.exists ? snap.get("similarAt") : null;
+    if (at && Date.now() - at.toMillis() < 90 * influence.DAY) return snap.get("similar") || [];
+    const similar = await lastfm.similarArtists(LASTFM_API_KEY.value(), artist);
+    await ref.set({ name: artist, similar, similarAt: FieldValue.serverTimestamp() }, { merge: true });
+    return similar;
+  });
+}
+
+/**
+ * Measures one delivered send, for the looks that are due (or a running look now, with `force`).
+ * Returns what it wrote, or null when there was nothing to do.
+ */
+async function measureSend(run, doc, { force = false } = {}) {
+  const d = doc.data();
+  if (d.status !== "delivered" || d.test || !d.pairId || !d.deliveredAt || !d.recipientUid) return null;
+  const pair = await cached(run.pairs, d.pairId, async () => {
+    const p = await db.collection("pairs").doc(d.pairId).get();
+    return p.exists ? p.data() : null;
+  });
+  if (!influence.sharing(pair)) return null;
+  const user = await cached(run.users, d.recipientUid, async () => {
+    const u = await userDoc(d.recipientUid).get();
+    return u.exists ? u.get("lastfm.username") : null;
+  });
+  if (!user) return null;
+
+  const now = Date.now();
+  const deliveredMs = d.deliveredAt.toMillis();
+  const age = (now - deliveredMs) / influence.DAY;
+  const looks = influence.due(age, d.influence);
+  if (force && age >= 1 && !looks.includes("latest")) looks.unshift("latest");
+  if (!looks.length) return null;
+
+  let entries;
+  try {
+    entries = JSON.parse(d.booklet).entries || [];
+  } catch (_) {
+    return null;
+  }
+  if (!entries.length) return null;
+  const name = (pair.names && pair.names[d.recipientUid]) || "";
+  const baseline = influence.sumWeeks(
+    await weeksFor(run, d.recipientUid, user, deliveredMs - influence.BASELINE_DAYS * influence.DAY, deliveredMs, 0),
+  );
+  const facts = await Promise.all(entries.map(async (e) => ({
+    trackCount: await trackCountFor(run, e.album),
+    similar: await similarFor(run, e.album.artist),
+  })));
+
+  const writes = {};
+  for (const look of looks) {
+    const days = look === "latest" ? Math.min(90, age) : Number(look.slice(1));
+    const after = influence.sumWeeks(
+      await weeksFor(run, d.recipientUid, user, deliveredMs, Math.min(now, deliveredMs + days * influence.DAY), 3),
+    );
+    const items = {};
+    let total = 0;
+    entries.forEach((e, i) => {
+      const r = influence.measure({ album: e.album, before: baseline, after, ...facts[i] });
+      items[i] = { ...r, line: influence.line(name, e.album, r) };
+      total += r.points;
+    });
+    const best = Object.entries(items)
+      .filter(([, r]) => r.points > 0)
+      .sort((a, b) => b[1].points - a[1].points)
+      .slice(0, 3)
+      .map(([i]) => Number(i));
+    writes[`influence.${look}`] = {
+      at: Timestamp.fromMillis(now),
+      days: Math.floor(days),
+      items,
+      total,
+      max: influence.maxPoints() * entries.length,
+      best,
+    };
+  }
+  await doc.ref.update(writes);
+  return writes;
+}
+
+// Each morning, the running look and any 30 or 90 day marks that are due.
+exports.measureInfluence = onSchedule(
+  { schedule: "30 5 * * *", timeZone: monthly.TIME_ZONE, timeoutSeconds: 540, memory: "512MiB" },
+  async () => {
+    const since = Timestamp.fromMillis(Date.now() - 95 * influence.DAY);
+    const snap = await db.collection("sends").where("deliveredAt", ">=", since).limit(400).get();
+    const run = influenceRun();
+    let measured = 0;
+    for (const doc of snap.docs) {
+      try {
+        if (await measureSend(run, doc)) measured++;
+      } catch (err) {
+        logger.warn("measureInfluence", { send: doc.id, message: err.message });
+      }
+    }
+    if (measured) logger.info("measureInfluence", { measured });
+  },
+);
+
+// "Check now" on the pair page: a running look at every send in the pair that's at least a day old.
+exports.influenceNow = onCall({ timeoutSeconds: 300, memory: "512MiB" }, async (request) => {
+  const uid = requireUid(request);
+  const d = request.data || {};
+  const { data } = await memberPair(uid, d.pairId);
+  if (!influence.sharing(data)) {
+    throw new HttpsError("failed-precondition", "Influence runs once you both turn sharing on in the pair's settings.");
+  }
+  const snap = await db.collection("sends").where("pairId", "==", d.pairId).get();
+  const run = influenceRun();
+  let measured = 0;
+  for (const doc of snap.docs) {
+    const latest = doc.get("influence.latest.at");
+    if (latest && Date.now() - latest.toMillis() < 60 * 60 * 1000) continue; // looked within the hour
+    try {
+      if (await measureSend(run, doc, { force: true })) measured++;
+    } catch (err) {
+      throw toHttpsError("influenceNow", err);
+    }
+  }
+  return { measured };
+});

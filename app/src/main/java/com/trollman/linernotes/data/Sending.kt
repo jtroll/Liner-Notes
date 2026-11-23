@@ -28,12 +28,14 @@ data class SendInfo(
     val set: GroupSet? = null,
     /** The recipient's reactions, by album position. */
     val reactions: Map<Int, Reaction> = emptyMap(),
+    /** What it did to the recipient's listening, when both turned sharing on. */
+    val influence: Influence = Influence(),
 ) {
     val delivered: Boolean get() = status == "delivered"
 
     /** This send as the recipient sees it, for the sender to look back at. */
     fun asReceived(): Received? = set?.let {
-        Received(id, fromName, deliveredAt ?: deliverAt, it, test, pairId, kind, reactions, mine = true)
+        Received(id, fromName, deliveredAt ?: deliverAt, it, test, pairId, kind, reactions, mine = true, influence = influence)
     }
 }
 
@@ -66,6 +68,7 @@ data class Received(
     val reactions: Map<Int, Reaction> = emptyMap(),
     /** True when it's one of the signed-in person's own sends, seen as the recipient sees it. */
     val mine: Boolean = false,
+    val influence: Influence = Influence(),
 ) {
     val isMonthly: Boolean get() = kind == "monthly"
 }
