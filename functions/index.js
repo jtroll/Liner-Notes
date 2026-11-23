@@ -243,6 +243,15 @@ function styleFrom(data) {
   };
 }
 
+// Where this album or artist showed up on the sender's earlier lists: [{year, artistOnly}].
+function earlierListsFrom(data) {
+  const raw = Array.isArray(data && data.earlierLists) ? data.earlierLists : [];
+  return raw
+    .filter((e) => e && /^\d{4}$/.test(String(e.year)))
+    .slice(0, 10)
+    .map((e) => ({ year: String(e.year), artistOnly: e.artistOnly === true }));
+}
+
 // One album's note: facts, reviews, Claude's draft in the sender's voice, then the fact check.
 exports.draftNote = onCall({ secrets: [ANTHROPIC_API_KEY], timeoutSeconds: 300, memory: "512MiB" }, async (request) => {
   requireUid(request);
@@ -266,10 +275,38 @@ exports.draftNote = onCall({ secrets: [ANTHROPIC_API_KEY], timeoutSeconds: 300, 
       style: styleFrom(d),
       instruction: optString(d, "instruction", 500),
       previous: optString(d, "previous", 4000),
+      connection: optString(d, "connection", 400),
+      earlierLists: earlierListsFrom(d),
       facts: found,
     });
   } catch (err) {
     throw toHttpsError("draftNote", err);
+  }
+});
+
+// A spoken note, transcribed on the phone, turned into the written note (SPEC.md, "Dictating a note").
+exports.formatDictation = onCall({ secrets: [ANTHROPIC_API_KEY], timeoutSeconds: 180 }, async (request) => {
+  requireUid(request);
+  const d = request.data || {};
+  const artist = requireString(d, "artist", 300);
+  const album = requireString(d, "album", 300);
+  const transcript = requireString(d, "transcript", 8000);
+  try {
+    const found = await facts.gather(LASTFM_API_KEY.value(), artist, album);
+    return await notes.formatDictation(ANTHROPIC_API_KEY.value(), {
+      artist,
+      album,
+      transcript,
+      senderName: optString(d, "senderName", 80),
+      recipientName: optString(d, "recipientName", 80),
+      current: optString(d, "current", 4000),
+      mode: d.mode === "add" ? "add" : "replace",
+      favoriteTracks: optStrings(d, "favoriteTracks", 9, 200),
+      style: styleFrom(d),
+      facts: found,
+    });
+  } catch (err) {
+    throw toHttpsError("formatDictation", err);
   }
 });
 

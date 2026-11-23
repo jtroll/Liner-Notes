@@ -378,6 +378,47 @@ class GroupSendViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * A spoken note (SPEC.md, "Dictating a note"): Claude writes the transcript up in the sender's
+     * own words. It replaces the note, or with [add] folds into it; the transcript is kept beside it.
+     */
+    fun dictate(id: String, key: String, transcript: String, add: Boolean) {
+        val cloud = graph.cloud ?: return say("Writing up a spoken note needs the backend (docs/SETUP.md).")
+        val s = set(id) ?: return
+        val entry = s.entries.firstOrNull { it.key == key } ?: return
+        val busyKey = "note:$id:$key"
+        if (busyKey in _state.value.busy) return
+        // Keep what they said straight away, so a failed write-up loses nothing.
+        editEntry(id, key) { if (it.transcripts.lastOrNull() == transcript) it else it.copy(transcripts = (it.transcripts + transcript).takeLast(10)) }
+        viewModelScope.launch {
+            busy(busyKey, true)
+            try {
+                val r = cloud.formatDictation(
+                    artist = entry.album.artist,
+                    album = entry.album.title,
+                    writing = _state.value.writing,
+                    recipientName = s.forName,
+                    transcript = transcript,
+                    current = if (add) (set(id)?.entries?.firstOrNull { it.key == key }?.note ?: entry.note) else "",
+                    add = add,
+                    favoriteTracks = entry.favoriteTracks,
+                )
+                if (r.note.isBlank()) say("The write-up came back empty. What you said is kept under the note.")
+                else editEntry(id, key) { it.copy(note = r.note, fixes = r.fixes, state = NoteState.Dictated, rev = it.rev + 1) }
+            } catch (e: Exception) {
+                Log.w(TAG, "Dictation write-up failed", e)
+                say("Couldn't write that up: ${describeError(e)} What you said is kept under the note.")
+            } finally {
+                busy(busyKey, false)
+            }
+        }
+    }
+
+    /** Puts a kept transcript in as the note, as said. */
+    fun useTranscript(id: String, key: String, transcript: String) = editEntry(id, key) {
+        it.copy(note = transcript, state = NoteState.Edited, fixes = emptyList(), rev = it.rev + 1)
+    }
+
     /** Drafts every note that's still empty, three at a time. */
     fun draftAll(id: String) {
         val s = set(id) ?: return

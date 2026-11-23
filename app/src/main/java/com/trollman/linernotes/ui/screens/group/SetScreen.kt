@@ -383,6 +383,7 @@ private fun NoteRow(index: Int, entry: SetEntry, drafting: Boolean, onOpen: () -
             when (entry.state) {
                 NoteState.Drafted -> add("CLAUDE'S DRAFT")
                 NoteState.Edited -> add("YOUR EDIT")
+                NoteState.Dictated -> add("YOUR WORDS")
                 NoteState.Empty -> {}
             }
             if (entry.flags.isNotEmpty()) add("${entry.flags.size} TO CHECK")

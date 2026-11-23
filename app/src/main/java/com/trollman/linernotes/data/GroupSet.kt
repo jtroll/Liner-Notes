@@ -37,7 +37,7 @@ fun albumKey(artist: String, title: String) = "${artist.lowercase()}\u0000${titl
 data class Source(val title: String, val url: String)
 
 @Serializable
-enum class NoteState { Empty, Drafted, Edited }
+enum class NoteState { Empty, Drafted, Edited, Dictated }
 
 @Immutable
 @Serializable
@@ -55,6 +55,10 @@ data class SetEntry(
     val rev: Int = 0,
     /** Monthly picks: how the album ties to what the recipient already loves (from the suggestion). */
     val connection: String = "",
+    /** What the sender said, word for word, each time they dictated, oldest first (kept so nothing is lost). */
+    val transcripts: List<String> = emptyList(),
+    /** Names or facts Claude corrected when it wrote up the last dictation. */
+    val fixes: List<String> = emptyList(),
 ) {
     val key: String get() = album.key
 }

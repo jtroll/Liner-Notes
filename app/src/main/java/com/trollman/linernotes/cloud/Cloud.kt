@@ -59,6 +59,7 @@ class Cloud {
 
     /** What Claude's draft of one note came back with. */
     data class Draft(val note: String, val sources: List<Source>, val flags: List<String>)
+    data class Dictated(val note: String, val fixes: List<String>)
 
     /**
      * Drafts one album's note in the sender's voice (functions/lib/notes.js). Takes up to a couple
@@ -99,6 +100,33 @@ class Cloud {
         }
         val flags = (r["flags"] as? List<*>).orEmpty().mapNotNull { it as? String }
         return Draft(note = r["note"] as? String ?: "", sources = sources, flags = flags)
+    }
+
+    /** A spoken note: Claude writes up the transcript in the sender's own words. */
+    suspend fun formatDictation(
+        artist: String,
+        album: String,
+        writing: Writing,
+        recipientName: String,
+        transcript: String,
+        current: String,
+        add: Boolean,
+        favoriteTracks: List<String>,
+    ): Dictated {
+        val r = call(
+            "formatDictation",
+            mapOf(
+                "artist" to artist, "album" to album, "transcript" to transcript,
+                "senderName" to writing.senderName, "recipientName" to recipientName,
+                "current" to current, "mode" to if (add) "add" else "replace",
+                "favoriteTracks" to favoriteTracks, "style" to style(writing),
+            ),
+            timeoutSeconds = 180,
+        )
+        return Dictated(
+            note = r["note"] as? String ?: "",
+            fixes = (r["fixes"] as? List<*>).orEmpty().mapNotNull { it as? String },
+        )
     }
 
     /** Drafts the set's intro or closing note, starting from last year's. */

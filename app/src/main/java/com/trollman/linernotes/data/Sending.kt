@@ -113,7 +113,7 @@ fun GroupSet.forRecipient(): GroupSet = copy(
     stretch = false,
     parked = emptyList(),
     entries = entries.map {
-        it.copy(aiDraft = "", flags = emptyList(), sources = emptyList(), connection = "", album = it.album.copy(plays = 0, weeks = 0))
+        it.copy(aiDraft = "", flags = emptyList(), sources = emptyList(), connection = "", transcripts = emptyList(), fixes = emptyList(), album = it.album.copy(plays = 0, weeks = 0))
     },
 )
 

@@ -96,3 +96,24 @@ test("pickAlbumTitle prefers the album's own article", () => {
 test("trimExtract drops the reference sections", () => {
   assert.strictEqual(trimExtract("Intro.\n\n== Reception ==\nGood.\n\n== Track listing ==\n1. A"), "Intro.\n\n== Reception ==\nGood.");
 });
+
+test("dictationPrompt keeps the sender's words and folds into the current note when adding", () => {
+  const { dictationPrompt } = require("../lib/notes");
+  const p = dictationPrompt({
+    artist: "The Smile", album: "Cutouts", senderName: "J", recipientName: "Sam",
+    transcript: "um so this is the smile, wait, the smile cutouts", current: "Earlier note.", mode: "add",
+    favoriteTracks: ["Foreign Spies"], style: {},
+  });
+  assert.match(p.system, /Keep their own words/);
+  assert.match(p.system, /adding to the note/);
+  assert.match(p.user, /<current>\nEarlier note\.\n<\/current>/);
+  assert.match(p.user, /<transcript>/);
+  const fresh = dictationPrompt({ artist: "A", album: "B", transcript: "t", current: "x", mode: "replace", style: {} });
+  assert.doesNotMatch(fresh.user, /<current>/);
+});
+
+test("parseFixes reads corrections and treats NONE as none", () => {
+  const { parseFixes } = require("../lib/notes");
+  assert.deepEqual(parseFixes("<note>x</note><fixes>NONE</fixes>"), []);
+  assert.deepEqual(parseFixes("<fixes>\n- \"the smile\" → The Smile\n- 2023 → 2024\n</fixes>"), ["\"the smile\" → The Smile", "2023 → 2024"]);
+});

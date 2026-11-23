@@ -257,6 +257,46 @@ function framePrompt(input) {
   return { system, user: user.trim() || "Write it." };
 }
 
+/**
+ * Turns a spoken note into a written one (SPEC.md, "Dictating a note"). `input`:
+ *   artist, album, senderName, recipientName, transcript, current (the note so far),
+ *   mode ("replace" | "add"), favoriteTracks [string], facts (from facts.gather), style.
+ * Keeps the sender's words and opinions; only tidies, fixes names, and never adds claims.
+ */
+function dictationPrompt(input) {
+  const [min, max] = wordRange(input.style);
+  const sender = input.senderName || "the sender";
+  const recipient = input.recipientName || "the recipient";
+  const adding = input.mode === "add" && input.current;
+  const system =
+    `${sender} spoke a short album note out loud for ${recipient}, and you turn the transcript into the written note. ` +
+    "The note is theirs, so:\n" +
+    "- Keep their own words, opinions, jokes and phrasing wherever you can. Rearrange only to make it read cleanly.\n" +
+    "- Remove filler, false starts, repeats and asides to you (\"um\", \"wait, no\", \"put that in the note\").\n" +
+    "- Fix artist, album, track and people's names, and dates, against the reference material when the transcript plainly mangled them.\n" +
+    "- Never add a fact, opinion or feeling they didn't say. Don't pad it out to a length.\n" +
+    `- One paragraph, first person as ${sender}, no headings, bullets or sign-off. Aim near ${min} to ${max} words only if they said that much.\n` +
+    (adding
+      ? "- They're adding to the note they already have: fold what they just said into it, keeping everything in the current note unless the new words correct it.\n"
+      : "") +
+    "Reply with the paragraph inside <note></note> tags, then inside <fixes></fixes> one line for each name or fact you corrected (what the transcript said and what you wrote), or NONE.";
+  let user = examplesBlock(input.style);
+  user += "Reference material, for spelling names and checking facts only:\n" + factsBlock(input.facts) + "\n\n";
+  user += `Album: ${input.artist} — ${input.album}\n`;
+  if (input.favoriteTracks && input.favoriteTracks.length) {
+    user += `Track names on it they may mention: ${input.favoriteTracks.map((t) => `"${t}"`).join(", ")}\n`;
+  }
+  if (adding) user += `\nThe current note:\n<current>\n${input.current}\n</current>\n`;
+  user += `\nWhat ${sender} said:\n<transcript>\n${input.transcript}\n</transcript>`;
+  return { system, user };
+}
+
+function parseFixes(text) {
+  const body = extractTag(text, "fixes");
+  if (body == null || /^none\.?$/i.test(body.trim())) return [];
+  return body.split("\n").map((l) => l.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim()).filter(Boolean).slice(0, 10);
+}
+
 /** `albums` is [{artist, title}]; returns the prompt for scoring them against `taste`. */
 function fitPrompt({ taste, albums }) {
   const system =
@@ -326,6 +366,15 @@ async function suggestMonthly(apiKey, input) {
   throw new NoteError("Claude didn't pick from the candidates. Try again.", "empty");
 }
 
+async function formatDictation(apiKey, input) {
+  const client = new Anthropic({ apiKey });
+  const response = await askOpus(client, { ...dictationPrompt(input), effort: "low", maxTokens: 8000 });
+  const text = textOf(response);
+  const note = extractTag(text, "note");
+  if (!note) throw new NoteError("The note came back empty.", "empty");
+  return { note, fixes: parseFixes(text) };
+}
+
 async function fitScores(apiKey, input) {
   const client = new Anthropic({ apiKey });
   const response = await askHaiku(client, { ...fitPrompt(input), effort: "low" });
@@ -338,6 +387,9 @@ module.exports = {
   draftFrame,
   fitScores,
   suggestMonthly,
+  formatDictation,
+  dictationPrompt,
+  parseFixes,
   // pure parts, for tests
   draftPrompt,
   parseDraft,

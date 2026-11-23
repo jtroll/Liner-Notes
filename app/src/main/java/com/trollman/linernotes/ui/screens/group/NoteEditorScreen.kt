@@ -1,5 +1,9 @@
 package com.trollman.linernotes.ui.screens.group
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -24,12 +28,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,6 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -48,7 +56,10 @@ import com.trollman.linernotes.data.Album
 import com.trollman.linernotes.data.GroupSet
 import com.trollman.linernotes.data.NoteState
 import com.trollman.linernotes.data.SetEntry
+import androidx.core.content.ContextCompat
 import com.trollman.linernotes.ui.system.CoverArt
+import com.trollman.linernotes.ui.system.Dictation
+import com.trollman.linernotes.ui.system.RecordKey
 import com.trollman.linernotes.ui.system.Panel
 import com.trollman.linernotes.ui.system.PhysicalButton
 import com.trollman.linernotes.ui.system.PhysicalTextButton
@@ -58,7 +69,7 @@ import com.trollman.linernotes.ui.theme.mono
 
 /**
  * One album's note (SPEC.md, "Composing and editing"): edit it, re-draft it with an instruction,
- * go back to Claude's draft, check the flags, and trim the Favorite Tracks.
+ * go back to Claude's draft, dictate it, check the flags, and trim the Favorite Tracks.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -130,12 +141,16 @@ fun NoteEditorScreen(
                 when (entry.state) {
                     NoteState.Drafted -> "CLAUDE'S DRAFT"
                     NoteState.Edited -> "YOUR EDIT"
+                    NoteState.Dictated -> "YOUR WORDS, WRITTEN UP"
                     NoteState.Empty -> ""
                 },
                 style = mono(10.sp),
                 color = c.inkFaint,
             )
         }
+        Spacer(Modifier.height(14.dp))
+
+        SpeakPanel(set, entry, state, vm, drafting, hasNote = text.isNotBlank())
         Spacer(Modifier.height(14.dp))
 
         // Drafting and re-drafting.
@@ -228,5 +243,108 @@ fun NoteEditorScreen(
             PhysicalTextButton("Next", { next?.let { onGo(it.key) } }, Modifier.weight(1f), enabled = next != null)
         }
         Spacer(Modifier.height(40.dp))
+    }
+}
+
+/**
+ * Speaking the note (SPEC.md, "Dictating a note"): hold the record key and talk, or tap to start
+ * and tap to stop. Claude writes it up in the sender's own words; what they said is kept below.
+ */
+@Composable
+private fun SpeakPanel(set: GroupSet, entry: SetEntry, state: GroupState, vm: GroupSendViewModel, drafting: Boolean, hasNote: Boolean) {
+    val c = liner
+    val context = LocalContext.current
+    var add by remember(entry.key) { mutableStateOf(hasNote) }
+    var problem by remember(entry.key) { mutableStateOf<String?>(null) }
+    var showSaid by remember(entry.key) { mutableStateOf(false) }
+    val addNow by androidx.compose.runtime.rememberUpdatedState(add && hasNote)
+    val dictation = remember(entry.key) {
+        Dictation(
+            context.applicationContext,
+            onDone = { said -> problem = null; vm.dictate(set.id, entry.key, said, addNow) },
+            onProblem = { problem = it },
+        )
+    }
+    dictation.hints = listOf(entry.album.artist, entry.album.title) + entry.favoriteTracks
+    DisposableEffect(dictation) { onDispose { dictation.release() } }
+    val mic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        problem = if (granted) "Ready. Hold the key and talk." else "Liner Notes needs the microphone to take a spoken note."
+    }
+    fun begin(): Boolean {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            mic.launch(Manifest.permission.RECORD_AUDIO)
+            return false
+        }
+        problem = null
+        dictation.start()
+        return dictation.listening
+    }
+
+    Panel {
+        Spacer(Modifier.height(8.dp))
+        SectionLabel("Say it")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            RecordKey(
+                listening = dictation.listening,
+                level = dictation.level,
+                onStart = ::begin,
+                onStop = { dictation.stop() },
+                enabled = !drafting && state.online,
+            )
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                when {
+                    dictation.listening -> {
+                        Text("LISTENING", style = mono(10.sp), color = c.signal)
+                        Text(
+                            dictation.heard.ifBlank { "Go ahead." },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = c.ink,
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    drafting && entry.transcripts.isNotEmpty() ->
+                        Text("Writing up what you said…", style = MaterialTheme.typography.bodyMedium, color = c.inkSoft)
+                    else -> Text(
+                        problem ?: "Hold to talk, or tap to start and tap again to stop. Claude tidies it into the note, in your words.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (problem != null) c.ink else c.inkSoft,
+                    )
+                }
+            }
+        }
+        if (hasNote) {
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = add, onClick = { add = true }, label = { Text("Add to the note") }, enabled = !dictation.listening)
+                FilterChip(selected = !add, onClick = { add = false }, label = { Text("Replace it") }, enabled = !dictation.listening)
+            }
+        }
+        if (!state.online) {
+            Spacer(Modifier.height(8.dp))
+            Text("Writing it up needs the backend, which this build doesn't have yet.", style = MaterialTheme.typography.bodySmall, color = c.inkFaint)
+        }
+        if (entry.state == NoteState.Dictated && entry.fixes.isNotEmpty()) {
+            Spacer(Modifier.height(10.dp))
+            Text("CORRECTED", style = mono(10.sp), color = c.inkFaint)
+            entry.fixes.forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = c.inkSoft) }
+        }
+        val said = entry.transcripts.lastOrNull()
+        if (said != null) {
+            Spacer(Modifier.height(6.dp))
+            TextButton(onClick = { showSaid = !showSaid }) {
+                Text(if (showSaid) "Hide what you said" else "What you said, word for word")
+            }
+            if (showSaid) {
+                Text(said, style = MaterialTheme.typography.bodySmall, color = c.inkSoft)
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    PhysicalTextButton("Use as said", { vm.useTranscript(set.id, entry.key, said) }, Modifier.weight(1f), enabled = !drafting)
+                    PhysicalTextButton("Write it up again", { vm.dictate(set.id, entry.key, said, add = false) }, Modifier.weight(1f), enabled = !drafting && state.online)
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
     }
 }
