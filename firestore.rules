@@ -1,0 +1,59 @@
+rules_version = '2';
+
+// Phase 0. Each person reads and writes only their own user document, and never the fields the
+// Functions own: the Last.fm and Spotify connections (set only after a real sign-in swap) and the
+// role. Tokens live in users/{uid}/private/*, which no client can touch; the Admin SDK in the
+// Functions ignores these rules. Group sets and writing settings are the owner's alone.
+//
+// Sending: invites are read and written only by the Functions. A pair is readable by its two
+// members. A send is readable by its sender, and by its recipient only once it's delivered, so a
+// scheduled present stays a surprise even to someone poking at the database. Only the Functions
+// write pairs and sends.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function owner(uid) { return signedIn() && request.auth.uid == uid; }
+    function serverOwned() { return ['lastfm', 'spotify', 'role']; }
+
+    match /users/{uid} {
+      allow read: if owner(uid);
+      allow create: if owner(uid)
+        && !request.resource.data.keys().hasAny(serverOwned());
+      allow update: if owner(uid)
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(serverOwned());
+      allow delete: if false;
+
+      match /private/{doc} {
+        allow read, write: if false;
+      }
+
+      match /sets/{setId} {
+        allow read, write: if owner(uid);
+      }
+
+      match /settings/{doc} {
+        allow read, write: if owner(uid);
+      }
+    }
+
+    match /invites/{token} {
+      allow read, write: if false;
+    }
+
+    match /pairs/{pairId} {
+      allow read: if signedIn() && request.auth.uid in resource.data.members;
+      allow write: if false;
+    }
+
+    match /sends/{sendId} {
+      allow read: if signedIn() && (
+        resource.data.senderUid == request.auth.uid
+        || (resource.data.recipientUid == request.auth.uid && resource.data.status == 'delivered'));
+      allow write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
