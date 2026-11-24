@@ -70,7 +70,9 @@ you have (Development Mode allows one per developer).
 - Client ID goes in the `SPOTIFY_CLIENT_ID` variable; client secret goes in Secret Manager
   (step 5).
 
-Playing in the app needs Spotify Premium and the Spotify app installed and signed in.
+The Spotify account that owns the developer app needs **Premium**, or Spotify switches the app
+off (its rule for Development Mode apps since February 2026). Playing in the app also needs
+Premium and the Spotify app installed and signed in.
 
 ## 4. Last.fm
 
